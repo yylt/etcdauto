@@ -1,0 +1,41 @@
+# syntax = docker/dockerfile:1.4
+
+ARG ETCD_IMAGE=gcr.io/etcd-development/etcd:v3.5.26
+
+FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS builder
+
+ARG TARGETOS
+ARG TARGETARCH
+ARG TARGETPLATFORM
+
+WORKDIR /
+
+COPY . .
+
+ENV GOPROXY=https://goproxy.cn,direct
+ENV GOARCH=${TARGETARCH}
+
+RUN make build
+
+FROM ${ETCD_IMAGE} as ETCD
+
+FROM debian:12-slim
+
+ARG TARGETPLATFORM
+
+USER root
+
+COPY --from=builder /bin/${TARGETPLATFORM}/etcdcluster /usr/bin/
+COPY --from=builder /bin/${TARGETPLATFORM}/ecsnode /usr/bin/
+
+COPY --from=ETCD /usr/local/bin/etcd /usr/bin/
+COPY --from=ETCD /usr/local/bin/etcdctl /usr/bin/
+
+RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends golang-cfssl && \
+    rm -rf /var/lib/apt/lists/*
+
+USER 65532:65532
+ENTRYPOINT ["etcdcluster"]
+
