@@ -17,11 +17,6 @@ type Config struct {
 	Secret        controller.SecretConfig    `json:"secret" yaml:"secret"`
 }
 
-var (
-	Version   string
-	BuildTime string
-)
-
 // LoadConfigmap reads data from file-path
 func LoadFromYaml(fp string) (*Config, error) {
 	var (

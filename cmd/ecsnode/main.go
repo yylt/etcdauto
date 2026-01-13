@@ -32,8 +32,6 @@ func init() {
 
 // printBuildInfo prints version and VCS information
 func printBuildInfo() {
-	klog.Infof("Starting ecsnode version: %s build-time: %s", Version, BuildTime)
-
 	// Get build info from runtime/debug
 	if info, ok := debug.ReadBuildInfo(); ok {
 		var vcsRevision, vcsTime, vcsModified string
@@ -49,8 +47,8 @@ func printBuildInfo() {
 		}
 
 		if vcsRevision != "" {
-			klog.Infof("VCS information: revision=%s time=%s modified=%s",
-				vcsRevision, vcsTime, vcsModified)
+			vcsRevision = vcsRevision[:8]
+			klog.Infof("Build information, reversion: %s, time: %s, modified: %s", vcsRevision, vcsTime, vcsModified)
 		}
 	}
 }

@@ -49,7 +49,8 @@ func printBuildInfo() {
 		}
 
 		if vcsRevision != "" {
-			klog.Infof("Build information, reversion: %s, time: %s, modified: %s", vcsModified, vcsTime, vcsRevision)
+			vcsRevision = vcsRevision[:8]
+			klog.Infof("Build information, reversion: %s, time: %s, modified: %s", vcsRevision, vcsTime, vcsModified)
 		}
 	}
 }
@@ -62,7 +63,7 @@ func main() {
 	printBuildInfo()
 	// 1. Check required environment variables
 	if err := checkRequiredEnvVars(); err != nil {
-		klog.Fatal("Missing required environment variables")
+		klog.Fatalf("Missing required environment variables: %s", err)
 	}
 	ETCDBIN, err = exec.LookPath("etcd")
 	if err != nil {
@@ -126,25 +127,19 @@ func checkRequiredEnvVars() error {
 	}
 
 	missingVars := []string{}
+	vars := map[string]string{}
 	for _, varName := range requiredVars {
 		if os.Getenv(varName) == "" {
 			missingVars = append(missingVars, varName)
+		} else {
+			vars[varName] = os.Getenv(varName)
 		}
 	}
 
 	if len(missingVars) > 0 {
 		return fmt.Errorf("Missing required environment variables: %v", missingVars)
 	}
-	klog.Info("Starting cluster initialization",
-		"SERVICE_NAME", os.Getenv("SERVICE_NAME"),
-		"MAX", os.Getenv("MAX"),
-		"POD_NAME", os.Getenv("POD_NAME"),
-		"POD_NAMESPACE", os.Getenv("POD_NAMESPACE"),
-		"ETCD_DATA_DIR", os.Getenv("ETCD_DATA_DIR"),
-		"NODEIP_DIR", os.Getenv("NODEIP_DIR"),
-		"CLIENT_PORT", os.Getenv("CLIENT_PORT"),
-		"PEER_PORT", os.Getenv("PEER_PORT"),
-	)
+	klog.Infof("Starting initialization with env: %s", vars)
 	return nil
 }
 

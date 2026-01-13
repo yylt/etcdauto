@@ -1,3 +1,11 @@
+#-----------function-------
+
+# define a function replacing spaces with commas in a list
+empty :=
+space := $(empty) $(empty)
+comma := ,
+join-with-comma = $(subst $(space),$(comma),$(strip $1))
+
 SHELL=/bin/bash -e -o pipefail
 PWD = $(shell pwd)
 ROOT_DIR = $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
@@ -7,11 +15,19 @@ BIN_SUBDIRS := cmd/ecsnode cmd/etcdcluster
 GCFLAGS ?=
 LDFLAGS ?= -w -s
 BUILD_PLATFORMS ?= linux/amd64
+IMAGE_PLATFORMS ?= $(call join-with-comma,$(BUILD_PLATFORMS))
 
 # Docker configuration
-DOCKER_REGISTRY ?=
-DOCKER_IMAGE ?= etcdauto
+DOCKER_REGISTRY ?= 
+DOCKER_IMAGE ?= multiarch/etcdcluster
 DOCKER_TAG ?= latest
+DOCKER_PUSH ?= 0
+
+ifeq ($(DOCKER_PUSH),1)
+DOCKER_BUILD_FLAGS = --push
+else
+DOCKER_BUILD_FLAGS = --load
+endif
 
 # Full image name
 ifeq ($(DOCKER_REGISTRY),)
@@ -87,7 +103,7 @@ clean: ## Cleans up everything
 
 docker: ## Builds docker image
 	@echo "Building Docker image: $(DOCKER_FULL_IMAGE)"
-	docker buildx build --load --cache-to type=inline  -t $(DOCKER_FULL_IMAGE) .
+	docker buildx build --platform $(IMAGE_PLATFORMS) $(DOCKER_BUILD_FLAGS) --cache-to type=inline  -t $(DOCKER_FULL_IMAGE) .
 
 docker-push: docker ## Builds and pushes docker image
 	@echo "Pushing Docker image: $(DOCKER_FULL_IMAGE)"
