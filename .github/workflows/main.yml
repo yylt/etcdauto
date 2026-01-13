@@ -28,7 +28,7 @@ jobs:
           go-version: 1.25
 
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v6
 
       # cache go modules
       - uses: actions/cache@v3
