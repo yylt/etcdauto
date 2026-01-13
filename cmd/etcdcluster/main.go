@@ -25,18 +25,12 @@ import (
 	"k8s.io/client-go/rest"
 
 	etcdcli "go.etcd.io/etcd/client/v3"
-	"go.uber.org/zap"
 	"k8s.io/klog/v2"
 )
 
 var (
-	Version   string
-	BuildTime string
-
 	ETCDBIN string
 )
-
-type EnvVars map[string]string
 
 // printBuildInfo prints version and VCS information
 func printBuildInfo() {
@@ -84,7 +78,7 @@ func main() {
 	// Parse POD_NAME
 	prefix, myIndex, err := parsePodName(os.Getenv("POD_NAME"))
 	if err != nil {
-		klog.Fatal("Failed to parse POD_NAME", zap.Error(err))
+		klog.Fatalf("Failed to parse POD_NAME: %s", err)
 	}
 
 	klog.Infof("Current pod IP: %s", myips)
@@ -142,14 +136,14 @@ func checkRequiredEnvVars() error {
 		return fmt.Errorf("Missing required environment variables: %v", missingVars)
 	}
 	klog.Info("Starting cluster initialization",
-		zap.String("SERVICE_NAME", os.Getenv("SERVICE_NAME")),
-		zap.String("MAX", os.Getenv("MAX")),
-		zap.String("POD_NAME", os.Getenv("POD_NAME")),
-		zap.String("POD_NAMESPACE", os.Getenv("POD_NAMESPACE")),
-		zap.String("ETCD_DATA_DIR", os.Getenv("ETCD_DATA_DIR")),
-		zap.String("NODEIP_DIR", os.Getenv("NODEIP_DIR")),
-		zap.String("CLIENT_PORT", os.Getenv("CLIENT_PORT")),
-		zap.String("PEER_PORT", os.Getenv("PEER_PORT")),
+		"SERVICE_NAME", os.Getenv("SERVICE_NAME"),
+		"MAX", os.Getenv("MAX"),
+		"POD_NAME", os.Getenv("POD_NAME"),
+		"POD_NAMESPACE", os.Getenv("POD_NAMESPACE"),
+		"ETCD_DATA_DIR", os.Getenv("ETCD_DATA_DIR"),
+		"NODEIP_DIR", os.Getenv("NODEIP_DIR"),
+		"CLIENT_PORT", os.Getenv("CLIENT_PORT"),
+		"PEER_PORT", os.Getenv("PEER_PORT"),
 	)
 	return nil
 }
@@ -167,14 +161,14 @@ func parsePodName(podName string) (string, int, error) {
 		return "", 0, fmt.Errorf("invalid index in POD_NAME: %s", podName)
 	}
 
-	klog.Info("Parsed POD_NAME", zap.String("prefix", prefix), zap.Int("index", index))
+	klog.InfoS("Parsed POD_NAME", "prefix", prefix, "index", index)
 	return prefix, index, nil
 }
 
 func domainIPList(domain string) ([]string, error) {
 	ips, err := net.LookupHost(domain)
 	if err != nil {
-		klog.Error("Failed to resolve domain", zap.String("domain", domain), zap.Error(err))
+		klog.Errorf("Failed to resolve domain %s: %v", domain, err)
 		return nil, err
 	}
 
@@ -183,7 +177,7 @@ func domainIPList(domain string) ([]string, error) {
 	}
 
 	iplist, err := readIPFile(ips[0])
-	klog.Info("Resolved domain", zap.String("domain", domain), zap.String("iplist", strings.Join(iplist, ",")))
+	klog.Infof("Resolved domain %s, iplist: %s", domain, strings.Join(iplist, ","))
 	return iplist, err
 }
 
@@ -197,12 +191,12 @@ func readIPFile(ip string) ([]string, error) {
 
 	content, err := os.ReadFile(ipFile)
 	if err != nil {
-		klog.Error("Failed to read IP file", zap.String("reslovip", ip), zap.Error(err))
+		klog.Errorf("Failed to read IP file %s: %v", ip, err)
 		return nil, err
 	}
 
 	ipList := strings.Split(strings.TrimSpace(string(content)), ",")
-	klog.Info("Read IPs from file", zap.String("reslovip", ip), zap.Strings("ips", ipList))
+	klog.Infof("Read IPs from file %s: %v", ip, ipList)
 	return ipList, nil
 }
 
@@ -222,13 +216,13 @@ func checkReadyz(ipport string, tlscfg *tls.Config) bool {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		klog.Error("Failed to create request", zap.String("url", url), zap.Error(err))
+		klog.Errorf("Failed to create request %s: %v", url, err)
 		return false
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		klog.Error("Failed to check health", zap.String("url", url))
+		klog.Errorf("Failed to check health %s", url)
 		return false
 	}
 	defer resp.Body.Close()
@@ -294,7 +288,7 @@ func getAliveEndpoints(prefix string, maxNodes, myIndex int) (aliveEndpoints map
 	// Load client cert
 	cert, err := tls.LoadX509KeyPair(os.Getenv("ETCDCTL_CERT"), os.Getenv("ETCDCTL_KEY"))
 	if err != nil {
-		klog.Fatal("Failed to load key pair", zap.Error(err))
+		klog.Fatalf("Failed to load key pair: %v", err)
 	}
 	tlscfg := &tls.Config{
 		Certificates:       []tls.Certificate{cert},
@@ -302,7 +296,7 @@ func getAliveEndpoints(prefix string, maxNodes, myIndex int) (aliveEndpoints map
 	}
 	podip, err := getaliveByk8s()
 	if err != nil {
-		klog.Error("Failed to read from k8s client", zap.Error(err))
+		klog.Errorf("Failed to read from k8s client: %v", err)
 		fromdns = true
 	}
 	for i := 0; i < maxNodes; i++ {
@@ -314,7 +308,7 @@ func getAliveEndpoints(prefix string, maxNodes, myIndex int) (aliveEndpoints map
 		if !fromdns {
 			hostip, ok := podip[podName]
 			if !ok {
-				klog.Info("Failed to get pod ip from k8s client", zap.String("podName", podName))
+				klog.Infof("Failed to get pod '%s' ip from k8s client", podName)
 			} else {
 				ips, err = readIPFile(hostip)
 			}
@@ -349,7 +343,7 @@ func getAliveEndpoints(prefix string, maxNodes, myIndex int) (aliveEndpoints map
 		}(ips, podName)
 	}
 	wg.Wait()
-	klog.Info("Total endpoints info", zap.Any("alive", aliveEndpoints), zap.Any("dead", deadnames))
+	klog.Infof("Total endpoints info, alive: '%s', dead: '%s'", aliveEndpoints, deadnames)
 	return aliveEndpoints, deadnames
 }
 
@@ -413,7 +407,7 @@ func joinExistingCluster(client etcdcli.Cluster, myIPs []string, deadnames map[s
 						return nil, err
 					}
 				}
-				klog.Info("memberdir exists, and include current pod, start etcd")
+				klog.Info("memberdir exists, and i'm in cluster, start etcd")
 				return startEtcd()
 			}
 		}
@@ -422,7 +416,7 @@ func joinExistingCluster(client etcdcli.Cluster, myIPs []string, deadnames map[s
 		}
 		// remove not exist member
 		if _, ok := deadnames[member.Name]; ok {
-			klog.Info("member is dead but in cluster, so remove it", zap.String("member", member.Name))
+			klog.Infof("member '%s' had dead but in cluster, remove it", member.Name)
 			_, err = client.MemberRemove(ctx, member.ID)
 			if err != nil {
 				return nil, err
@@ -431,10 +425,7 @@ func joinExistingCluster(client etcdcli.Cluster, myIPs []string, deadnames map[s
 	}
 	// must remove member, because memberdir not exists, but member exist
 	if myMemberID != 0 {
-		klog.Info("in cluster, but data not exist, should remove then rejoin",
-			zap.Uint64("id", myMemberID),
-			zap.String("name", podname),
-		)
+		klog.Infof("%s(%04d...) in cluster, but data not exist, should remove then rejoin", podname, myMemberID)
 		_, err = client.MemberRemove(ctx, myMemberID)
 		if err != nil {
 			return nil, err
@@ -449,7 +440,7 @@ func joinExistingCluster(client etcdcli.Cluster, myIPs []string, deadnames map[s
 	defer cancle2()
 	if len(resp.Members) != 1 {
 		if nonLearn == 1 {
-			klog.Info("member count > 1, but non learner is 1", zap.Int("nonLearn", nonLearn))
+			klog.Info("member count > 1, but non learner is 1")
 			return nil, fmt.Errorf("non learner is 1")
 		}
 		klog.Info("add member then start etcd")
@@ -480,7 +471,7 @@ func joinExistingCluster(client etcdcli.Cluster, myIPs []string, deadnames map[s
 			time.Sleep(2 * time.Second)
 			_, err = client.MemberPromote(bgct, addResp.Member.ID)
 			if err == nil {
-				klog.Info("promote member success", zap.String("member", podname))
+				klog.Infof("promote member '%s' success", podname)
 				break
 			}
 			count++
@@ -527,7 +518,7 @@ func waitExit(cmd *exec.Cmd) {
 	go func() {
 		err := cmd.Wait()
 		if err != nil {
-			klog.Info("进程退出并出现错误：", zap.Error(err))
+			klog.Infof("进程退出并出现错误：%v", err)
 		} else {
 			klog.Info("进程成功退出。")
 		}
@@ -537,9 +528,9 @@ func waitExit(cmd *exec.Cmd) {
 	klog.Info("主进程正在等待信号或子进程退出...")
 	select {
 	case s := <-signalChan:
-		fmt.Printf("\n主进程收到信号：%v，准备退出。\n", s)
+		klog.Infof("主进程收到信号：%v，准备退出。\n", s)
 		if err := cmd.Process.Kill(); err != nil {
-			klog.Fatal("无法杀死子进程", zap.Error(err))
+			klog.Fatalf("无法杀死子进程: %v", err)
 		}
 		klog.Info("已杀死子进程。")
 	case <-processExitChan:

@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: read
+
+env:
+  BUILD_PLATFORM: linux/amd64,linux/arm64
+  ONLINE_REGISTER: ghcr.io
+  ONLINE_REGISTER_USER: ${{ github.actor }}
+  ONLINE_REGISTER_PASSWORD: ${{ secrets.PACKAGE_TOKEN }}
+
+
+jobs:
+  release:
+    if: github.repository == 'yylt/etcdauto'
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+    - uses: actions/setup-go@v6
+      with:
+        go-version: '1.25'
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Login to online register
+      uses: docker/login-action@v3
+      with:
+        username: ${{ env.ONLINE_REGISTER_USER }}
+        password: ${{ env.ONLINE_REGISTER_PASSWORD }}
+        registry: ${{ env.ONLINE_REGISTER }}
+
+    - name: Build and Push Image
+      uses: docker/build-push-action@v6
+      id: docker_build_release
+      with:
+        context: .
+        file: Dockerfile
+        push: true
+        provenance: false
+        platforms: ${{ env.BUILD_PLATFORM }}
+        tags: |
+          ${{ env.ONLINE_REGISTER }}/${{ github.repository }}:${{ github.ref_name }},
+          ${{ env.ONLINE_REGISTER }}/${{ github.repository }}:latest
+        build-args: |
+          GIT_COMMIT_VERSION=${{ env.commitver }}
+          GIT_COMMIT_TIME=${{ env.committime }}
+          VERSION=${{ github.ref_name }}
