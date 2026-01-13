@@ -50,7 +50,4 @@ jobs:
         tags: |
           ${{ env.ONLINE_REGISTER }}/${{ github.repository }}:${{ github.ref_name }},
           ${{ env.ONLINE_REGISTER }}/${{ github.repository }}:latest
-        build-args: |
-          GIT_COMMIT_VERSION=${{ env.commitver }}
-          GIT_COMMIT_TIME=${{ env.committime }}
-          VERSION=${{ github.ref_name }}
+
