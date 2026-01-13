@@ -2,7 +2,7 @@
 
 ARG ETCD_IMAGE=gcr.io/etcd-development/etcd:v3.5.26
 
-FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS builder
+FROM --platform=$BUILDPLATFORM golang:1.25 AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
@@ -15,7 +15,7 @@ COPY . .
 ENV GOPROXY=https://goproxy.cn,direct
 ENV GOARCH=${TARGETARCH}
 
-RUN make build
+RUN BUILD_PLATFORMS=${TARGETPLATFORM} make build
 
 FROM ${ETCD_IMAGE} as ETCD
 

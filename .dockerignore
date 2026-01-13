@@ -1,6 +1,7 @@
 # editor files
 .vscode/
 .idea/
+.claude/
 
 # git
 .git/
@@ -15,8 +16,3 @@ out/
 api/
 **/*.md
 
-# other files not needed for build
-.editorconfig
-.golangci.yml
-Makefile
-tools.go

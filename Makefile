@@ -6,7 +6,7 @@ BIN_SUBDIRS := cmd/ecsnode cmd/etcdcluster
 # Build configuration
 GCFLAGS ?=
 LDFLAGS ?= -w -s
-PLATFORMS ?= linux/amd64
+BUILD_PLATFORMS ?= linux/amd64
 
 # Docker configuration
 DOCKER_REGISTRY ?=
@@ -44,9 +44,9 @@ fmt: ## Formats all code with go fmt
 test-build: ## Tests whether the code compiles
 	@go build -o /dev/null ./...
 
-build: tidy 
+build: 
 	@for DIR in $(BIN_SUBDIRS); do \
-		for PLATFORM in $(PLATFORMS); do \
+		for PLATFORM in $(BUILD_PLATFORMS); do \
 			mkdir -p $(ROOT_DIR)/bin/$${PLATFORM}; \
 			echo "Building \"$${DIR##*/}\" for $${PLATFORM}"; \
 			GOOS=$${PLATFORM%/*} GOARCH=$${PLATFORM#*/} \
@@ -87,7 +87,7 @@ clean: ## Cleans up everything
 
 docker: ## Builds docker image
 	@echo "Building Docker image: $(DOCKER_FULL_IMAGE)"
-	docker buildx build --cache-to type=inline -t $(DOCKER_FULL_IMAGE) .
+	docker buildx build --load --cache-to type=inline  -t $(DOCKER_FULL_IMAGE) .
 
 docker-push: docker ## Builds and pushes docker image
 	@echo "Pushing Docker image: $(DOCKER_FULL_IMAGE)"

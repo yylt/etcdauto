@@ -54,8 +54,6 @@ jobs:
       - name: Lints all code with golangci-lint
         run: make lint
 
-      
-
       - name: Runs all tests
         run: make test
 
