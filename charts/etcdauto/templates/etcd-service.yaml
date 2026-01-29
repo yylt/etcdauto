@@ -1,0 +1,45 @@
+{{- if .Values.etcd.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.etcd.service.name }}
+  namespace: {{ include "etcdauto.namespace" . }}
+  labels:
+    {{- include "etcdauto.labels" . | nindent 4 }}
+    component: etcd
+spec:
+  type: {{ .Values.etcd.service.type }}
+  clusterIP: {{ .Values.etcd.service.clusterIP }}
+  publishNotReadyAddresses: {{ .Values.etcd.service.publishNotReadyAddresses }}
+  selector:
+    component: etcd
+  ports:
+  - name: client
+    port: {{ .Values.etcd.service.ports.client.port }}
+    targetPort: {{ .Values.etcd.service.ports.client.targetPort }}
+    protocol: {{ .Values.etcd.service.ports.client.protocol }}
+  - name: peer
+    port: {{ .Values.etcd.service.ports.peer.port }}
+    targetPort: {{ .Values.etcd.service.ports.peer.targetPort }}
+    protocol: {{ .Values.etcd.service.ports.peer.protocol }}
+---
+{{- if .Values.etcd.clientService.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.etcd.clientService.name }}
+  namespace: {{ include "etcdauto.namespace" . }}
+  labels:
+    {{- include "etcdauto.labels" . | nindent 4 }}
+    component: etcd
+spec:
+  type: {{ .Values.etcd.clientService.type }}
+  selector:
+    component: etcd
+  ports:
+  - name: client
+    port: {{ .Values.etcd.clientService.port }}
+    targetPort: {{ .Values.etcd.ports.client }}
+    protocol: TCP
+{{- end }}
+{{- end }}

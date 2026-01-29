@@ -1,0 +1,259 @@
+# Default values for etcdauto
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# Global settings
+global:
+  # Namespace to deploy resources
+  namespace: openstack
+
+# ECSNode controller configuration
+ecsnode:
+  enabled: true
+  replicaCount: 1
+
+  image:
+    repository: hub.easystack.cn/multiarch/etcdcluster
+    tag: v0.0.1
+    pullPolicy: IfNotPresent
+
+  serviceAccount:
+    create: true
+    name: ecsnode
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  # ECSNode configuration
+  config:
+    # ConfigMap name for node IPs
+    configMapName: nodeips
+    # Network interfaces to monitor
+    interfaces:
+      - roller
+      - management
+      - storagepub
+    # Master interface
+    masterInterface: roller
+    # Pod label selector
+    podLabels:
+      component: etcd
+    # Service configuration
+    service:
+      name: etcd
+      ports:
+        - targetPort: 2479
+          port: 2479
+          protocol: TCP
+    # Secret configuration for client certificates
+    secret:
+      name: etcd-client
+      caCrtFile: /etc/ssl/ca.pem
+      caKeyFile: /etc/ssl/ca-key.pem
+      profile:
+        expiry: 876000h
+        usage:
+          - signing
+          - key encipherment
+          - digital signature
+          - server auth
+          - client auth
+
+# etcd StatefulSet configuration
+etcd:
+  enabled: true
+
+  # Number of etcd replicas
+  replicaCount: 3
+
+  image:
+    repository: hub.easystack.cn/multiarch/etcdcluster
+    tag: v0.0.1
+    pullPolicy: IfNotPresent
+
+  serviceAccount:
+    create: true
+    name: etcdcluster
+
+  # Service configuration
+  service:
+    # Headless service name (must match StatefulSet serviceName)
+    name: etcd-server
+    type: ClusterIP
+    clusterIP: None
+    publishNotReadyAddresses: true
+    ports:
+      client:
+        port: 2479
+        targetPort: 2479
+        protocol: TCP
+      peer:
+        port: 2480
+        targetPort: 2480
+        protocol: TCP
+
+  # Client service (optional, for external access)
+  clientService:
+    enabled: false
+    name: etcd
+    type: ClusterIP
+    port: 2479
+
+  # Port configuration
+  ports:
+    client: 2479
+    peer: 2480
+
+  # Network configuration
+  network:
+    # Use host network
+    hostNetwork: true
+    # Network interfaces (comma-separated)
+    interfaces: "br-roller,br-mgmt,br-storagepub"
+
+  # Storage configuration
+  storage:
+    # Use memory-backed storage (emptyDir with Memory medium)
+    useMemory: true
+    # If useMemory is false, use PVC
+    size: 10Gi
+    storageClassName: ""
+
+  # Resource limits and requests
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+
+  # Init container resources
+  initResources:
+    requests:
+      cpu: 100m
+      memory: 16Mi
+    limits:
+      cpu: 500m
+      memory: 128Mi
+
+  # Liveness probe configuration
+  livenessProbe:
+    enabled: true
+    initialDelaySeconds: 10
+    periodSeconds: 5
+    timeoutSeconds: 5
+    failureThreshold: 6
+    successThreshold: 1
+
+  # Readiness probe configuration
+  readinessProbe:
+    enabled: true
+    initialDelaySeconds: 5
+    periodSeconds: 3
+    timeoutSeconds: 5
+    failureThreshold: 4
+    successThreshold: 1
+
+  # Node affinity configuration
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          preference:
+            matchExpressions:
+              - key: openstack-control-plane
+                operator: In
+                values:
+                  - enabled
+        - weight: 50
+          preference:
+            matchExpressions:
+              - key: openstack-compute-node
+                operator: In
+                values:
+                  - enabled
+    # Pod anti-affinity to spread pods across nodes
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchExpressions:
+              - key: component
+                operator: In
+                values:
+                  - etcd
+          topologyKey: kubernetes.io/hostname
+
+  # Node selector
+  nodeSelector:
+    kubernetes.io/os: linux
+
+  # Tolerations
+  tolerations: []
+
+  # etcd configuration
+  config:
+    # Auto compaction retention (hours)
+    autoCompactionRetention: 1
+    # Backend freelist type
+    backendFreelistType: map
+    # Quota backend bytes (8GB)
+    quotaBackendBytes: 8589934592
+    # Logger type
+    logger: zap
+    # Initial corrupt check
+    initialCorruptCheck: true
+    # Metrics level
+    metrics: basic
+    # Election timeout (ms)
+    electionTimeout: 2000
+    # Heartbeat interval (ms)
+    heartbeatInterval: 100
+    # Initial cluster token
+    initialClusterToken: etcd_tmpfs
+    # Unsupported architecture
+    unsupportedArch: arm64
+    # Health check timeout
+    timeout: 5
+
+# TLS/SSL configuration
+tls:
+  # Enable TLS
+  enabled: true
+  # Secret name containing CA certificate
+  secretName: etcd-ssl
+  # CA certificate (base64 encoded)
+  # If not provided, you must create the secret manually
+  caCert: ""
+  caKey: ""
+  # Auto-generate certificates
+  autoGenerate: false
+
+# RBAC configuration
+rbac:
+  # Create RBAC resources
+  create: true
+  # ECSNode cluster role rules
+  ecsnodeRules:
+    - apiGroups: ["cluster.ecas.io"]
+      resources: ["*"]
+      verbs: ["*"]
+    - apiGroups: ["", "coordination.k8s.io"]
+      resources: ["*"]
+      verbs: ["*"]
+  # etcd cluster role rules
+  etcdRules:
+    - apiGroups: [""]
+      resources: ["pods"]
+      verbs: ["*"]
+
+# ConfigMap for node IPs
+nodeIpsConfigMap:
+  create: true
+  name: nodeips
+  data: {}

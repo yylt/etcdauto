@@ -1,0 +1,294 @@
+{{- if .Values.etcd.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: etcd-server
+  namespace: {{ include "etcdauto.namespace" . }}
+  labels:
+    {{- include "etcdauto.labels" . | nindent 4 }}
+    component: etcd
+spec:
+  serviceName: {{ .Values.etcd.service.name }}
+  replicas: {{ .Values.etcd.replicaCount }}
+  selector:
+    matchLabels:
+      component: etcd
+  template:
+    metadata:
+      labels:
+        component: etcd
+    spec:
+      {{- with .Values.etcd.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.etcd.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.etcd.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "etcdauto.etcd.serviceAccountName" . }}
+      hostNetwork: {{ .Values.etcd.network.hostNetwork }}
+      volumes:
+      {{- if .Values.etcd.storage.useMemory }}
+      - name: data
+        emptyDir:
+          medium: Memory
+      {{- end }}
+      - name: nodeips
+        configMap:
+          name: {{ .Values.nodeIpsConfigMap.name }}
+      - name: ssl
+        secret:
+          secretName: {{ .Values.tls.secretName }}
+          items:
+          - key: ca.pem
+            path: ca.pem
+          - key: ca-key.pem
+            path: ca-key.pem
+      initContainers:
+      - name: crt
+        image: "{{ .Values.etcd.image.repository }}:{{ .Values.etcd.image.tag }}"
+        imagePullPolicy: {{ .Values.etcd.image.pullPolicy }}
+        command: ["/usr/bin/dumb-init", "--"]
+        env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: SERVICE_NAME
+          value: {{ .Values.etcd.service.name | quote }}
+        - name: CLI_NAME
+          value: {{ .Values.etcd.clientService.name | default "etcd" | quote }}
+        - name: CLIENT_PORT
+          value: {{ .Values.etcd.ports.client | quote }}
+        - name: PEER_PORT
+          value: {{ .Values.etcd.ports.peer | quote }}
+        - name: NODEIP_DIR
+          value: "/run/nodeip"
+        - name: MAX
+          value: {{ .Values.etcd.replicaCount | quote }}
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: INTERFACES
+          value: {{ .Values.etcd.network.interfaces | quote }}
+        volumeMounts:
+        - name: data
+          mountPath: /run/etcd
+        - name: ssl
+          mountPath: /run/ssl
+        resources:
+          {{- toYaml .Values.etcd.initResources | nindent 10 }}
+        args:
+        - /bin/bash
+        - -cex
+        - |
+          # 目录和文件准备
+          DATA_DIR=/run/etcd/data
+          CERT_DIR=/run/etcd/ssl
+          ENV_FILE=/run/etcd/env
+          LIVEZ_FILE=/run/etcd/livez.sh
+          READYZ_FILE=/run/etcd/readyz.sh
+
+          mkdir -p $DATA_DIR
+          mkdir -p $CERT_DIR
+          touch $ENV_FILE && chmod +x $ENV_FILE
+          touch $LIVEZ_FILE && chmod +x $LIVEZ_FILE
+          touch $READYZ_FILE && chmod +x $READYZ_FILE
+
+          IFS=',' read -r -a interface_array <<< "$INTERFACES"
+
+          url_list=()
+          curl_list=()
+          crt_list=""
+          for interface in "${interface_array[@]}"; do
+            ipa=$(ip -4 addr show "$interface" | awk '/inet / {print $2}' | cut -d/ -f1 | head -n 1)
+            if [ -n "$ipa" ]; then
+                url="https://${ipa}:${PEER_PORT}"
+                url_list+=("$url")
+                urlc="https://${ipa}:${CLIENT_PORT}"
+                curl_list+=("$urlc")
+                crt_list="$crt_list\"$ipa\","
+            else
+                echo "Interface $interface: No IP Address found"
+            fi
+          done
+          PEERS=$(IFS=,; echo "${url_list[*]}")
+          CLIENTS=$(IFS=,; echo "${curl_list[*]}")
+
+          # 进入 ssl 目录
+          cd $CERT_DIR
+
+          # 准备 config 和 csr 10y
+          cat <<EOF > config.json
+          {
+            "signing": {
+              "profiles": {
+                "server": {
+                  "expiry": "87600h",
+                  "usages": [
+                    "signing",
+                    "key encipherment",
+                    "digital signature",
+                    "server auth",
+                    "client auth"
+                  ]
+                }
+              }
+            }
+          }
+          EOF
+          cat <<EOF > ${POD_NAME}-csr.json
+          {
+            "CN": "$POD_NAME",
+            "hosts": [
+              "$CLI_NAME.$NAMESPACE",
+              "$CLI_NAME.$NAMESPACE.svc",
+              "$CLI_NAME.$NAMESPACE.svc.cluster.local",
+              "$POD_NAME.$SERVICE_NAME.$NAMESPACE.svc",
+              "$POD_NAME.$SERVICE_NAME.$NAMESPACE",
+              "$POD_NAME.$SERVICE_NAME.$NAMESPACE.svc.cluster.local",
+              "$POD_IP",$crt_list
+              "localhost",
+              "127.0.0.1"
+            ],
+            "key": {
+              "algo": "ecdsa",
+              "size": 256
+            }
+          }
+          EOF
+
+          if [ -s "/run/ssl/${POD_NAME}.pem" ]; then
+            echo "证书已存在，跳过生成"
+          else
+            cfssl gencert -ca=/run/ssl/ca.pem -ca-key=/run/ssl/ca-key.pem \
+              -config=config.json -profile=server ${POD_NAME}-csr.json | cfssljson -bare ${POD_NAME}
+            cp /run/ssl/ca.pem $CERT_DIR/
+          fi
+
+          # 准备 health check 文件
+          cat <<'EOF' > $READYZ_FILE
+          #!/bin/bash
+          . /run/etcd/env
+          timeout ${TIMEOUT} curl -k --cert ${ETCDCTL_CERT} --key ${ETCDCTL_KEY} -sf https://127.0.0.1:${CLIENT_PORT}/readyz
+          EOF
+
+          # 准备 env 文件
+          cat <<EOF > $ENV_FILE
+
+          export POD_IPS=${crt_list}
+          export LABELS="component=etcd"
+          export MAX=${MAX}
+          export PEER_PORT=${PEER_PORT}
+          export SERVICE_NAME=${SERVICE_NAME}
+          export CLIENT_PORT=${CLIENT_PORT}
+          export NODEIP_DIR=${NODEIP_DIR}
+
+          export POD_NAME=${POD_NAME}
+          export POD_NAMESPACE=${NAMESPACE}
+
+          export ETCD_DATA_DIR=${DATA_DIR}
+          export ETCD_ADVERTISE_CLIENT_URLS=${CLIENTS}
+          export ETCD_INITIAL_ADVERTISE_PEER_URLS=${PEERS}
+          export ETCD_LISTEN_CLIENT_URLS=https://0.0.0.0:${CLIENT_PORT}
+          export ETCD_LISTEN_PEER_URLS=https://0.0.0.0:${PEER_PORT}
+          export ETCD_NAME=${POD_NAME}
+          export ETCD_AUTO_COMPACTION_RETENTION={{ .Values.etcd.config.autoCompactionRetention }}
+          export ETCD_EXPERIMENTAL_BACKEND_BBOLT_FREELIST_TYPE={{ .Values.etcd.config.backendFreelistType }}
+          export ETCD_QUOTA_BACKEND_BYTES={{ .Values.etcd.config.quotaBackendBytes }}
+          export ETCD_LOGGER={{ .Values.etcd.config.logger }}
+          export ETCD_EXPERIMENTAL_INITIAL_CORRUPT_CHECK={{ .Values.etcd.config.initialCorruptCheck }}
+          export ETCD_METRICS={{ .Values.etcd.config.metrics }}
+          export ETCD_ELECTION_TIMEOUT={{ .Values.etcd.config.electionTimeout }}
+          export ETCD_HEARTBEAT_INTERVAL={{ .Values.etcd.config.heartbeatInterval }}
+          export ETCD_INITIAL_CLUSTER_TOKEN={{ .Values.etcd.config.initialClusterToken }}
+
+          # TLS settings
+          export ETCD_TRUSTED_CA_FILE=${CERT_DIR}/ca.pem
+          export ETCD_CERT_FILE=${CERT_DIR}/${POD_NAME}.pem
+          export ETCD_KEY_FILE=${CERT_DIR}/${POD_NAME}-key.pem
+          export ETCD_CLIENT_CERT_AUTH=true
+
+          export ETCD_PEER_TRUSTED_CA_FILE=${CERT_DIR}/ca.pem
+          export ETCD_PEER_CERT_FILE=${CERT_DIR}/${POD_NAME}.pem
+          export ETCD_PEER_KEY_FILE=${CERT_DIR}/${POD_NAME}-key.pem
+          export ETCD_PEER_CLIENT_CERT_AUTH=true
+
+          export ETCD_UNSUPPORTED_ARCH={{ .Values.etcd.config.unsupportedArch }}
+
+          # etcdctl 使用
+          export TIMEOUT={{ .Values.etcd.config.timeout }}
+          export ETCDCTL_CACERT=${CERT_DIR}/ca.pem
+          export ETCDCTL_CERT=${CERT_DIR}/${POD_NAME}.pem
+          export ETCDCTL_KEY=${CERT_DIR}/${POD_NAME}-key.pem
+
+          export ETCDCTL_ENDPOINTS=https://127.0.0.1:${CLIENT_PORT}
+
+          EOF
+      containers:
+      - name: etcd-tmpfs
+        image: "{{ .Values.etcd.image.repository }}:{{ .Values.etcd.image.tag }}"
+        imagePullPolicy: {{ .Values.etcd.image.pullPolicy }}
+        command: ["/usr/bin/dumb-init", "--"]
+        args:
+        - "bash"
+        - "-c"
+        - "source /run/etcd/env && exec etcdcluster"
+        ports:
+        - containerPort: {{ .Values.etcd.ports.client }}
+          name: client
+        - containerPort: {{ .Values.etcd.ports.peer }}
+          name: peer
+        volumeMounts:
+        - name: data
+          mountPath: /run/etcd
+        - name: nodeips
+          mountPath: /run/nodeip
+        {{- if .Values.etcd.readinessProbe.enabled }}
+        readinessProbe:
+          exec:
+            command:
+            - /run/etcd/readyz.sh
+          initialDelaySeconds: {{ .Values.etcd.readinessProbe.initialDelaySeconds }}
+          periodSeconds: {{ .Values.etcd.readinessProbe.periodSeconds }}
+          timeoutSeconds: {{ .Values.etcd.readinessProbe.timeoutSeconds }}
+          failureThreshold: {{ .Values.etcd.readinessProbe.failureThreshold }}
+          successThreshold: {{ .Values.etcd.readinessProbe.successThreshold }}
+        {{- end }}
+        {{- if .Values.etcd.livenessProbe.enabled }}
+        livenessProbe:
+          exec:
+            command:
+            - /run/etcd/readyz.sh
+          initialDelaySeconds: {{ .Values.etcd.livenessProbe.initialDelaySeconds }}
+          periodSeconds: {{ .Values.etcd.livenessProbe.periodSeconds }}
+          timeoutSeconds: {{ .Values.etcd.livenessProbe.timeoutSeconds }}
+          failureThreshold: {{ .Values.etcd.livenessProbe.failureThreshold }}
+          successThreshold: {{ .Values.etcd.livenessProbe.successThreshold }}
+        {{- end }}
+        resources:
+          {{- toYaml .Values.etcd.resources | nindent 10 }}
+  {{- if not .Values.etcd.storage.useMemory }}
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      {{- if .Values.etcd.storage.storageClassName }}
+      storageClassName: {{ .Values.etcd.storage.storageClassName }}
+      {{- end }}
+      resources:
+        requests:
+          storage: {{ .Values.etcd.storage.size }}
+  {{- end }}
+{{- end }}

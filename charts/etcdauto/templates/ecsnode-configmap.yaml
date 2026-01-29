@@ -1,0 +1,41 @@
+{{- if .Values.ecsnode.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ecsnode-etc
+  namespace: {{ include "etcdauto.namespace" . }}
+  labels:
+    {{- include "etcdauto.labels" . | nindent 4 }}
+data:
+  config.yaml: |-
+    configmap:
+      name: {{ .Values.ecsnode.config.configMapName }}
+    ecsnode:
+      namespace: {{ include "etcdauto.namespace" . }}
+      interfaces:
+      {{- range .Values.ecsnode.config.interfaces }}
+      - {{ . }}
+      {{- end }}
+      masterif: {{ .Values.ecsnode.config.masterInterface }}
+    pod:
+      labels:
+        {{- toYaml .Values.ecsnode.config.podLabels | nindent 8 }}
+    service:
+      name: {{ .Values.ecsnode.config.service.name }}
+      ports:
+      {{- range .Values.ecsnode.config.service.ports }}
+      - targetPort: {{ .targetPort }}
+        port: {{ .port }}
+        protocol: {{ .protocol }}
+      {{- end }}
+    secret:
+      name: {{ .Values.ecsnode.config.secret.name }}
+      ca_crtfile: {{ .Values.ecsnode.config.secret.caCrtFile }}
+      ca_keyfile: {{ .Values.ecsnode.config.secret.caKeyFile }}
+      profile:
+        expirey: {{ .Values.ecsnode.config.secret.profile.expiry }}
+        usage:
+        {{- range .Values.ecsnode.config.secret.profile.usage }}
+        - {{ . }}
+        {{- end }}
+{{- end }}

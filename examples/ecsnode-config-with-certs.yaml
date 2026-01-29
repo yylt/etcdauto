@@ -1,0 +1,45 @@
+# ECSNode Configuration Example with Certificate Management
+
+# Certificate management configuration
+cert:
+  enabled: true                          # Enable automatic certificate generation
+  caSecretName: "etcd-ca"               # CA certificate secret name
+  caSecretNamespace: "default"          # CA secret namespace (optional, defaults to NAMESPACE env)
+  memberSecretName: "etcd-member-cert"  # Member certificate secret name
+  memberSecretNamespaces:               # List of namespaces to create member secrets
+    - "default"
+    - "etcd-system"
+    - "production"
+  validityYears: 100                    # Certificate validity in years
+  organization: "etcdauto"              # Organization name for certificates
+  commonName: "etcdauto-ca"             # CA common name
+
+# ECSNode configuration
+ecsnode:
+  namespace: default
+  interfaces:
+    - "eth0"
+    - "eth1"
+  masterif: "eth0"
+
+# Pod configuration
+pod:
+  namespace: default
+  labels:
+    app: etcd
+    component: etcd-server
+
+# Optional: Service configuration
+service:
+  name: "etcd-service"
+  namespace: "default"
+
+# Optional: ConfigMap configuration
+configmap:
+  name: "etcd-config"
+  namespace: "default"
+
+# Optional: Secret configuration
+secret:
+  name: "etcd-secret"
+  namespace: "default"

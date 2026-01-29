@@ -9,7 +9,46 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// CertConfig holds certificate management configuration
+type CertConfig struct {
+	Enabled                bool     `json:"enabled" yaml:"enabled"`                               // Enable certificate management
+	CASecretName           string   `json:"caSecretName" yaml:"caSecretName"`                     // CA certificate secret name
+	CASecretNamespace      string   `json:"caSecretNamespace" yaml:"caSecretNamespace"`           // CA certificate secret namespace
+	MemberSecretName       string   `json:"memberSecretName" yaml:"memberSecretName"`             // Member certificate secret name
+	MemberSecretNamespaces []string `json:"memberSecretNamespaces" yaml:"memberSecretNamespaces"` // Member certificate secret namespaces (list)
+	ValidityYears          int      `json:"validityYears" yaml:"validityYears"`                   // Certificate validity in years (default: 100)
+	Organization           string   `json:"organization" yaml:"organization"`                     // Organization name for certificates
+	CommonName             string   `json:"commonName" yaml:"commonName"`                         // Common name for CA certificate
+}
+
+// Valid validates certificate configuration
+func (c *CertConfig) Valid() error {
+	if !c.Enabled {
+		return nil
+	}
+	if c.CASecretName == "" {
+		return fmt.Errorf("caSecretName is required when cert management is enabled")
+	}
+	if c.MemberSecretName == "" {
+		return fmt.Errorf("memberSecretName is required when cert management is enabled")
+	}
+	if len(c.MemberSecretNamespaces) == 0 {
+		return fmt.Errorf("memberSecretNamespaces is required when cert management is enabled")
+	}
+	if c.ValidityYears <= 0 {
+		c.ValidityYears = 100 // Default to 100 years
+	}
+	if c.Organization == "" {
+		c.Organization = "etcdauto"
+	}
+	if c.CommonName == "" {
+		c.CommonName = "etcdauto-ca"
+	}
+	return nil
+}
+
 type Config struct {
+	Cert          CertConfig                  `json:"cert" yaml:"cert"`
 	Configmap     controller.ConfigMapConfig `json:"configmap" yaml:"configmap"`
 	PodConfig     controller.PodConfig       `json:"pod" yaml:"pod"`
 	EcsNode       controller.EcsNodeConfig   `json:"ecsnode" yaml:"ecsnode"`
@@ -39,6 +78,21 @@ func ApplyDefault(newcfg *Config, defaultns string) error {
 	if newcfg == nil {
 		return fmt.Errorf("config is nil")
 	}
+
+	// Apply defaults for certificate config
+	if newcfg.Cert.Enabled {
+		if newcfg.Cert.CASecretNamespace == "" {
+			newcfg.Cert.CASecretNamespace = defaultns
+		}
+		// If no member secret namespaces specified, use default namespace
+		if len(newcfg.Cert.MemberSecretNamespaces) == 0 {
+			newcfg.Cert.MemberSecretNamespaces = []string{defaultns}
+		}
+		if err := newcfg.Cert.Valid(); err != nil {
+			return fmt.Errorf("cert config is invalid: %w", err)
+		}
+	}
+
 	if newcfg.Configmap.Name != "" {
 		if newcfg.Configmap.Namespace == "" {
 			newcfg.Configmap.Namespace = defaultns

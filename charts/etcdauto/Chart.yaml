@@ -1,0 +1,16 @@
+apiVersion: v2
+name: etcdauto
+description: A Helm chart for etcdauto - automatic etcd cluster management
+type: application
+version: 0.1.0
+appVersion: "v0.0.1"
+keywords:
+  - etcd
+  - cluster
+  - database
+  - key-value
+home: https://github.com/yylt/etcdauto
+sources:
+  - https://github.com/yylt/etcdauto
+maintainers:
+  - name: yylt

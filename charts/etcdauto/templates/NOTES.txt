@@ -1,0 +1,61 @@
+Thank you for installing {{ .Chart.Name }}!
+
+Your release is named {{ .Release.Name }}.
+
+To learn more about the release, try:
+
+  $ helm status {{ .Release.Name }} -n {{ include "etcdauto.namespace" . }}
+  $ helm get all {{ .Release.Name }} -n {{ include "etcdauto.namespace" . }}
+
+{{- if .Values.etcd.enabled }}
+
+etcd cluster has been deployed with {{ .Values.etcd.replicaCount }} replicas.
+
+To check the status of your etcd cluster:
+
+  $ kubectl get pods -n {{ include "etcdauto.namespace" . }} -l component=etcd
+
+To check etcd health:
+
+  $ kubectl exec -n {{ include "etcdauto.namespace" . }} etcd-server-0 -- /run/etcd/readyz.sh
+
+{{- if .Values.etcd.clientService.enabled }}
+
+etcd client service is available at:
+
+  {{ .Values.etcd.clientService.name }}.{{ include "etcdauto.namespace" . }}.svc.cluster.local:{{ .Values.etcd.clientService.port }}
+
+{{- end }}
+
+etcd endpoints:
+{{- range $i := until (int .Values.etcd.replicaCount) }}
+  - etcd-server-{{ $i }}.{{ $.Values.etcd.service.name }}.{{ include "etcdauto.namespace" $ }}.svc.cluster.local:{{ $.Values.etcd.ports.client }}
+{{- end }}
+
+{{- end }}
+
+{{- if .Values.ecsnode.enabled }}
+
+ECSNode controller has been deployed.
+
+To check the status:
+
+  $ kubectl get pods -n {{ include "etcdauto.namespace" . }} -l app=ecsnode
+
+{{- end }}
+
+{{- if not (or .Values.tls.caCert .Values.tls.caKey) }}
+
+WARNING: TLS certificates are not provided in values.
+Please ensure the secret '{{ .Values.tls.secretName }}' exists in namespace '{{ include "etcdauto.namespace" . }}'.
+
+To create the secret manually:
+
+  $ kubectl create secret generic {{ .Values.tls.secretName }} \
+      --from-file=ca.pem=path/to/ca.pem \
+      --from-file=ca-key.pem=path/to/ca-key.pem \
+      -n {{ include "etcdauto.namespace" . }}
+
+{{- end }}
+
+For more information, visit: https://github.com/yylt/etcdauto

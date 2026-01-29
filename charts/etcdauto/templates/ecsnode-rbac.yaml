@@ -1,0 +1,33 @@
+{{- if and .Values.rbac.create .Values.ecsnode.enabled .Values.ecsnode.serviceAccount.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "etcdauto.ecsnode.serviceAccountName" . }}
+  namespace: {{ include "etcdauto.namespace" . }}
+  labels:
+    {{- include "etcdauto.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ecsnode-watcher-role
+  labels:
+    {{- include "etcdauto.labels" . | nindent 4 }}
+rules:
+{{- toYaml .Values.rbac.ecsnodeRules | nindent 0 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ecsnode-watcher-binding
+  labels:
+    {{- include "etcdauto.labels" . | nindent 4 }}
+subjects:
+- kind: ServiceAccount
+  name: {{ include "etcdauto.ecsnode.serviceAccountName" . }}
+  namespace: {{ include "etcdauto.namespace" . }}
+roleRef:
+  kind: ClusterRole
+  name: ecsnode-watcher-role
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

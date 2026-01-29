@@ -1,0 +1,166 @@
+# Example values for production deployment
+# Copy this file and customize for your environment
+
+global:
+  namespace: production
+
+ecsnode:
+  enabled: true
+  replicaCount: 1
+
+  image:
+    repository: your-registry/etcdcluster
+    tag: v0.0.1
+    pullPolicy: IfNotPresent
+
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+  config:
+    configMapName: nodeips
+    interfaces:
+      - eth0
+      - eth1
+    masterInterface: eth0
+    podLabels:
+      component: etcd
+    service:
+      name: etcd
+      ports:
+        - targetPort: 2379
+          port: 2379
+          protocol: TCP
+
+etcd:
+  enabled: true
+  replicaCount: 5
+
+  image:
+    repository: your-registry/etcdcluster
+    tag: v0.0.1
+    pullPolicy: IfNotPresent
+
+  service:
+    name: etcd-server
+    type: ClusterIP
+    clusterIP: None
+    publishNotReadyAddresses: true
+    ports:
+      client:
+        port: 2379
+        targetPort: 2379
+        protocol: TCP
+      peer:
+        port: 2380
+        targetPort: 2380
+        protocol: TCP
+
+  clientService:
+    enabled: true
+    name: etcd-client
+    type: ClusterIP
+    port: 2379
+
+  ports:
+    client: 2379
+    peer: 2380
+
+  network:
+    hostNetwork: false
+    interfaces: "eth0,eth1"
+
+  storage:
+    useMemory: false
+    size: 20Gi
+    storageClassName: fast-ssd
+
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 4000m
+      memory: 8Gi
+
+  initResources:
+    requests:
+      cpu: 100m
+      memory: 32Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+  livenessProbe:
+    enabled: true
+    initialDelaySeconds: 15
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 5
+    successThreshold: 1
+
+  readinessProbe:
+    enabled: true
+    initialDelaySeconds: 10
+    periodSeconds: 5
+    timeoutSeconds: 5
+    failureThreshold: 3
+    successThreshold: 1
+
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          preference:
+            matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchExpressions:
+              - key: component
+                operator: In
+                values:
+                  - etcd
+          topologyKey: kubernetes.io/hostname
+
+  nodeSelector:
+    kubernetes.io/os: linux
+
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+
+  config:
+    autoCompactionRetention: 1
+    backendFreelistType: map
+    quotaBackendBytes: 8589934592
+    logger: zap
+    initialCorruptCheck: true
+    metrics: extensive
+    electionTimeout: 2000
+    heartbeatInterval: 100
+    initialClusterToken: etcd-production
+    unsupportedArch: arm64
+    timeout: 10
+
+tls:
+  enabled: true
+  secretName: etcd-ssl
+  # Provide base64-encoded CA certificate and key
+  # caCert: LS0tLS1CRUdJTi...
+  # caKey: LS0tLS1CRUdJTi...
+
+rbac:
+  create: true
+
+nodeIpsConfigMap:
+  create: true
+  name: nodeips
+  data: {}

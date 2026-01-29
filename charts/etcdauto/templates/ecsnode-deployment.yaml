@@ -1,0 +1,50 @@
+{{- if .Values.ecsnode.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: etcd-ecsnode
+  namespace: {{ include "etcdauto.namespace" . }}
+  labels:
+    {{- include "etcdauto.labels" . | nindent 4 }}
+    app: ecsnode
+spec:
+  replicas: {{ .Values.ecsnode.replicaCount }}
+  selector:
+    matchLabels:
+      app: ecsnode
+  template:
+    metadata:
+      labels:
+        app: ecsnode
+    spec:
+      serviceAccountName: {{ include "etcdauto.ecsnode.serviceAccountName" . }}
+      containers:
+      - name: ecsnode
+        image: "{{ .Values.ecsnode.image.repository }}:{{ .Values.ecsnode.image.tag }}"
+        imagePullPolicy: {{ .Values.ecsnode.image.pullPolicy }}
+        command: ["ecsnode", "-config", "/app/config.yaml"]
+        env:
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        volumeMounts:
+        - name: etc
+          mountPath: /app
+        - name: ssl
+          mountPath: /etc/ssl
+        resources:
+          {{- toYaml .Values.ecsnode.resources | nindent 10 }}
+      volumes:
+      - name: etc
+        configMap:
+          name: ecsnode-etc
+      - name: ssl
+        secret:
+          secretName: {{ .Values.tls.secretName }}
+          items:
+          - key: ca.pem
+            path: ca.pem
+          - key: ca-key.pem
+            path: ca-key.pem
+{{- end }}

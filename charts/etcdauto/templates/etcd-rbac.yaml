@@ -1,0 +1,33 @@
+{{- if and .Values.rbac.create .Values.etcd.enabled .Values.etcd.serviceAccount.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "etcdauto.etcd.serviceAccountName" . }}
+  namespace: {{ include "etcdauto.namespace" . }}
+  labels:
+    {{- include "etcdauto.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: etcdcluster-role
+  labels:
+    {{- include "etcdauto.labels" . | nindent 4 }}
+rules:
+{{- toYaml .Values.rbac.etcdRules | nindent 0 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: etcdcluster-binding
+  labels:
+    {{- include "etcdauto.labels" . | nindent 4 }}
+subjects:
+- kind: ServiceAccount
+  name: {{ include "etcdauto.etcd.serviceAccountName" . }}
+  namespace: {{ include "etcdauto.namespace" . }}
+roleRef:
+  kind: ClusterRole
+  name: etcdcluster-role
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}
