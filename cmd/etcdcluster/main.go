@@ -233,7 +233,7 @@ func initializeEnvironment(cfg *Config) error {
 
 // runClusterLoop runs the main cluster management loop
 func runClusterLoop(cfg *Config) {
-	clusterMgr := cluster.NewManager(&cluster.ClusterConfig{
+	clusterMgr := cluster.NewManager(&cluster.Config{
 		PodName:    cfg.PodName,
 		PeerPort:   cfg.PeerPort,
 		ClientPort: cfg.ClientPort,

@@ -109,43 +109,9 @@ func GenerateMemberCert(ca *CACertificate, cfg *MemberCertConfig) (*MemberCertif
 
 // LoadMemberCert loads member certificate and private key from PEM data
 func LoadMemberCert(certPEM, keyPEM []byte) (*MemberCertificate, error) {
-	// Decode certificate
-	certBlock, _ := pem.Decode(certPEM)
-	if certBlock == nil {
-		return nil, fmt.Errorf("failed to decode certificate PEM")
-	}
-
-	cert, err := x509.ParseCertificate(certBlock.Bytes)
+	cert, privateKey, err := loadCertAndKey(certPEM, keyPEM)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse certificate: %w", err)
-	}
-
-	// Decode private key
-	keyBlock, _ := pem.Decode(keyPEM)
-	if keyBlock == nil {
-		return nil, fmt.Errorf("failed to decode private key PEM")
-	}
-
-	var privateKey *ecdsa.PrivateKey
-	switch keyBlock.Type {
-	case "EC PRIVATE KEY":
-		privateKey, err = x509.ParseECPrivateKey(keyBlock.Bytes)
-	case "PRIVATE KEY":
-		key, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse PKCS8 private key: %w", err)
-		}
-		var ok bool
-		privateKey, ok = key.(*ecdsa.PrivateKey)
-		if !ok {
-			return nil, fmt.Errorf("private key is not ECDSA")
-		}
-	default:
-		return nil, fmt.Errorf("unsupported private key type: %s", keyBlock.Type)
-	}
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse private key: %w", err)
+		return nil, err
 	}
 
 	return &MemberCertificate{

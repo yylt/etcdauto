@@ -74,8 +74,8 @@ func (sm *SecretManager) EnsureCASecret(ctx context.Context, secretName string, 
 				AnnotationRotationFlag: "false", // Reserved for future rotation feature
 			},
 			Labels: map[string]string{
-				"app.kubernetes.io/name":      "etcd",
-				"app.kubernetes.io/component": "ca-certificate",
+				"app.kubernetes.io/name":       "etcd",
+				"app.kubernetes.io/component":  "ca-certificate",
 				"app.kubernetes.io/managed-by": "etcdauto",
 			},
 		},

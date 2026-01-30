@@ -48,7 +48,7 @@ func (c *CertConfig) Valid() error {
 }
 
 type Config struct {
-	Cert          CertConfig                  `json:"cert" yaml:"cert"`
+	Cert          CertConfig                 `json:"cert" yaml:"cert"`
 	Configmap     controller.ConfigMapConfig `json:"configmap" yaml:"configmap"`
 	PodConfig     controller.PodConfig       `json:"pod" yaml:"pod"`
 	EcsNode       controller.EcsNodeConfig   `json:"ecsnode" yaml:"ecsnode"`

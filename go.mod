@@ -5,6 +5,7 @@ go 1.25.3
 require (
 	github.com/cloudflare/cfssl v1.6.5
 	github.com/golangci/golangci-lint v1.64.8
+	go.etcd.io/etcd/api/v3 v3.6.7
 	go.etcd.io/etcd/client/v3 v3.6.7
 	golang.org/x/vuln v1.1.4
 	gopkg.in/yaml.v3 v3.0.1
@@ -220,7 +221,6 @@ require (
 	gitlab.com/bosi/decorder v0.4.2 // indirect
 	go-simpler.org/musttag v0.13.0 // indirect
 	go-simpler.org/sloglint v0.9.0 // indirect
-	go.etcd.io/etcd/api/v3 v3.6.7 // indirect
 	go.etcd.io/etcd/client/pkg/v3 v3.6.7 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel v1.39.0 // indirect

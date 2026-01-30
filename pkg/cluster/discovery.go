@@ -35,95 +35,126 @@ type DiscoveryConfig struct {
 
 // EndpointInfo holds information about discovered endpoints
 type EndpointInfo struct {
-	AliveEndpoints map[string][]string   // podName -> []IP
-	DeadNames      map[string]struct{}   // podName -> struct
+	AliveEndpoints map[string][]string // podName -> []IP
+	DeadNames      map[string]struct{} // podName -> struct
 }
 
 // DiscoverEndpoints discovers alive and dead etcd endpoints
 func DiscoverEndpoints(cfg *DiscoveryConfig) (*EndpointInfo, error) {
-	var (
-		wg         sync.WaitGroup
-		mu         sync.Mutex
-		fromdns    = false
-	)
-
 	info := &EndpointInfo{
 		AliveEndpoints: make(map[string][]string),
 		DeadNames:      make(map[string]struct{}),
 	}
 
 	// Load client cert for health checks
-	cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
+	tlscfg, err := loadTLSConfig(cfg.CertFile, cfg.KeyFile)
+	if err != nil {
+		return nil, err
+	}
+
+	// Try to get pod IPs from Kubernetes API
+	podip, fromdns := getPodIPMapping(cfg.Namespace, cfg.Labels)
+
+	// Check each pod
+	checkPods(cfg, info, tlscfg, podip, fromdns)
+
+	klog.Infof("Total endpoints info, alive: '%v', dead: '%v'", info.AliveEndpoints, info.DeadNames)
+	return info, nil
+}
+
+// loadTLSConfig loads TLS configuration from cert and key files
+func loadTLSConfig(certFile, keyFile string) (*tls.Config, error) {
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load key pair: %w", err)
 	}
 
-	tlscfg := &tls.Config{
+	return &tls.Config{
 		Certificates:       []tls.Certificate{cert},
 		InsecureSkipVerify: true,
-	}
+	}, nil
+}
 
-	// Try to get pod IPs from Kubernetes API
-	podip, err := getPodIPsFromK8s(cfg.Namespace, cfg.Labels)
+// getPodIPMapping gets pod IP mapping from Kubernetes API or falls back to DNS
+func getPodIPMapping(namespace, labels string) (map[string]string, bool) {
+	podip, err := getPodIPsFromK8s(namespace, labels)
 	if err != nil {
 		klog.Errorf("Failed to read from k8s client: %v, falling back to DNS", err)
-		fromdns = true
+		return nil, true
 	}
+	return podip, false
+}
 
-	// Check each pod
+// checkPods checks health of all pods in the cluster
+func checkPods(cfg *DiscoveryConfig, info *EndpointInfo, tlscfg *tls.Config, podip map[string]string, fromdns bool) {
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
 	for i := 0; i < cfg.MaxNodes; i++ {
 		if i == cfg.MyIndex {
 			continue
 		}
 
-		var ips []string
 		podName := fmt.Sprintf("%s-%d", cfg.Prefix, i)
+		ips := getPodIPs(podName, cfg, podip, fromdns)
 
-		if !fromdns {
-			hostip, ok := podip[podName]
-			if !ok {
-				klog.Infof("Failed to get pod '%s' ip from k8s client", podName)
-			} else {
-				ips, err = readIPFile(cfg.NodeIPDir, hostip)
-			}
-		} else {
-			domain := fmt.Sprintf("%s.%s.%s.svc.cluster.local",
-				podName, cfg.ServiceName, cfg.Namespace)
-			ips, err = resolveDomainIPs(domain, cfg.NodeIPDir)
-		}
-
-		if err != nil || len(ips) == 0 {
+		if len(ips) == 0 {
 			info.DeadNames[podName] = struct{}{}
 			continue
 		}
 
 		wg.Add(1)
-		go func(iplist []string, podname string) {
-			defer wg.Done()
-			var ready bool
-
-			// Check if node is healthy
-			for _, ip := range iplist {
-				ipport := net.JoinHostPort(ip, cfg.ClientPort)
-				if checkReadyz(ipport, tlscfg) {
-					ready = true
-					break
-				}
-			}
-
-			mu.Lock()
-			defer mu.Unlock()
-			if ready {
-				info.AliveEndpoints[podname] = iplist
-			} else {
-				info.DeadNames[podname] = struct{}{}
-			}
-		}(ips, podName)
+		go checkPodHealth(podName, ips, cfg.ClientPort, tlscfg, info, &mu, &wg)
 	}
 
 	wg.Wait()
-	klog.Infof("Total endpoints info, alive: '%v', dead: '%v'", info.AliveEndpoints, info.DeadNames)
-	return info, nil
+}
+
+// getPodIPs gets IP addresses for a pod
+func getPodIPs(podName string, cfg *DiscoveryConfig, podip map[string]string, fromdns bool) []string {
+	var ips []string
+	var err error
+
+	if !fromdns {
+		hostip, ok := podip[podName]
+		if !ok {
+			klog.Infof("Failed to get pod '%s' ip from k8s client", podName)
+			return nil
+		}
+		ips, err = readIPFile(cfg.NodeIPDir, hostip)
+	} else {
+		domain := fmt.Sprintf("%s.%s.%s.svc.cluster.local",
+			podName, cfg.ServiceName, cfg.Namespace)
+		ips, err = resolveDomainIPs(domain, cfg.NodeIPDir)
+	}
+
+	if err != nil {
+		return nil
+	}
+	return ips
+}
+
+// checkPodHealth checks if a pod is healthy
+func checkPodHealth(podname string, iplist []string, clientPort string, tlscfg *tls.Config, info *EndpointInfo, mu *sync.Mutex, wg *sync.WaitGroup) {
+	defer wg.Done()
+	var ready bool
+
+	// Check if node is healthy
+	for _, ip := range iplist {
+		ipport := net.JoinHostPort(ip, clientPort)
+		if checkReadyz(ipport, tlscfg) {
+			ready = true
+			break
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if ready {
+		info.AliveEndpoints[podname] = iplist
+	} else {
+		info.DeadNames[podname] = struct{}{}
+	}
 }
 
 // getPodIPsFromK8s retrieves pod IPs from Kubernetes API
