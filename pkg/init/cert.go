@@ -59,7 +59,31 @@ func GenerateCertificate(cfg *CertConfig) error {
 		return fmt.Errorf("failed to generate private key: %w", err)
 	}
 
-	// Build DNS names and IP addresses
+	// Create certificate template
+	template := createCertTemplate(cfg)
+
+	// Sign certificate
+	certDER, err := x509.CreateCertificate(rand.Reader, template, caCert, &privateKey.PublicKey, caKey)
+	if err != nil {
+		return fmt.Errorf("failed to create certificate: %w", err)
+	}
+
+	// Write certificate and key files
+	if err := writeCertFiles(certFile, keyFile, certDER, privateKey); err != nil {
+		return err
+	}
+
+	// Copy CA certificate to cert directory
+	if err := copyCACert(cfg.CAFile, cfg.CertDir); err != nil {
+		return err
+	}
+
+	klog.Infof("Successfully generated certificate: %s", certFile)
+	return nil
+}
+
+// createCertTemplate creates a certificate template with DNS names and IP addresses
+func createCertTemplate(cfg *CertConfig) *x509.Certificate {
 	dnsNames := []string{
 		fmt.Sprintf("%s.%s", cfg.CliName, cfg.Namespace),
 		fmt.Sprintf("%s.%s.svc", cfg.CliName, cfg.Namespace),
@@ -73,7 +97,6 @@ func GenerateCertificate(cfg *CertConfig) error {
 	ipAddresses := []string{"127.0.0.1", cfg.PodIP}
 	ipAddresses = append(ipAddresses, cfg.ExtraIPs...)
 
-	// Create certificate template
 	template := &x509.Certificate{
 		SerialNumber: generateSerialNumber(),
 		Subject: pkix.Name{
@@ -94,12 +117,11 @@ func GenerateCertificate(cfg *CertConfig) error {
 		}
 	}
 
-	// Sign certificate
-	certDER, err := x509.CreateCertificate(rand.Reader, template, caCert, &privateKey.PublicKey, caKey)
-	if err != nil {
-		return fmt.Errorf("failed to create certificate: %w", err)
-	}
+	return template
+}
 
+// writeCertFiles writes certificate and private key to files
+func writeCertFiles(certFile, keyFile string, certDER []byte, privateKey *ecdsa.PrivateKey) error {
 	// Write certificate
 	certOut, err := os.Create(certFile)
 	if err != nil {
@@ -127,45 +149,65 @@ func GenerateCertificate(cfg *CertConfig) error {
 		return fmt.Errorf("failed to write key: %w", err)
 	}
 
-	// Copy CA certificate to cert directory
-	caPemFile := filepath.Join(cfg.CertDir, "ca.pem")
+	return nil
+}
+
+// copyCACert copies CA certificate to cert directory
+func copyCACert(caFile, certDir string) error {
+	caPemFile := filepath.Join(certDir, "ca.pem")
 	if !fileExists(caPemFile) {
-		if err := copyFile(cfg.CAFile, caPemFile); err != nil {
+		if err := copyFile(caFile, caPemFile); err != nil {
 			return fmt.Errorf("failed to copy CA cert: %w", err)
 		}
 	}
-
-	klog.Infof("Successfully generated certificate: %s", certFile)
 	return nil
 }
 
 // loadCA loads CA certificate and private key
 func loadCA(certFile, keyFile string) (*x509.Certificate, interface{}, error) {
-	// Load CA certificate
+	caCert, err := loadCACertificate(certFile)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	caKey, err := loadCAPrivateKey(keyFile)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return caCert, caKey, nil
+}
+
+// loadCACertificate loads CA certificate from file
+func loadCACertificate(certFile string) (*x509.Certificate, error) {
 	certPEM, err := os.ReadFile(certFile)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read CA cert: %w", err)
+		return nil, fmt.Errorf("failed to read CA cert: %w", err)
 	}
 
 	block, _ := pem.Decode(certPEM)
 	if block == nil {
-		return nil, nil, fmt.Errorf("failed to decode CA cert PEM")
+		return nil, fmt.Errorf("failed to decode CA cert PEM")
 	}
 
 	caCert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse CA cert: %w", err)
+		return nil, fmt.Errorf("failed to parse CA cert: %w", err)
 	}
 
-	// Load CA private key
+	return caCert, nil
+}
+
+// loadCAPrivateKey loads CA private key from file
+func loadCAPrivateKey(keyFile string) (interface{}, error) {
 	keyPEM, err := os.ReadFile(keyFile)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read CA key: %w", err)
+		return nil, fmt.Errorf("failed to read CA key: %w", err)
 	}
 
 	keyBlock, _ := pem.Decode(keyPEM)
 	if keyBlock == nil {
-		return nil, nil, fmt.Errorf("failed to decode CA key PEM")
+		return nil, fmt.Errorf("failed to decode CA key PEM")
 	}
 
 	var caKey interface{}
@@ -177,14 +219,14 @@ func loadCA(certFile, keyFile string) (*x509.Certificate, interface{}, error) {
 	case "PRIVATE KEY":
 		caKey, err = x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
 	default:
-		return nil, nil, fmt.Errorf("unsupported key type: %s", keyBlock.Type)
+		return nil, fmt.Errorf("unsupported key type: %s", keyBlock.Type)
 	}
 
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse CA key: %w", err)
+		return nil, fmt.Errorf("failed to parse CA key: %w", err)
 	}
 
-	return caCert, caKey, nil
+	return caKey, nil
 }
 
 // generateSerialNumber generates a random serial number for certificate

@@ -14,8 +14,8 @@ import (
 
 // CAConfig holds CA certificate configuration
 type CAConfig struct {
-	CommonName   string // CA common name
-	Organization string // Organization name
+	CommonName    string // CA common name
+	Organization  string // Organization name
 	ValidityYears int    // Certificate validity in years (e.g., 100)
 }
 
@@ -98,21 +98,36 @@ func GenerateCA(cfg *CAConfig) (*CACertificate, error) {
 
 // LoadCA loads CA certificate and private key from PEM data
 func LoadCA(certPEM, keyPEM []byte) (*CACertificate, error) {
+	cert, privateKey, err := loadCertAndKey(certPEM, keyPEM)
+	if err != nil {
+		return nil, err
+	}
+
+	return &CACertificate{
+		Certificate: cert,
+		PrivateKey:  privateKey,
+		CertPEM:     certPEM,
+		KeyPEM:      keyPEM,
+	}, nil
+}
+
+// loadCertAndKey is a helper function to load certificate and private key from PEM data
+func loadCertAndKey(certPEM, keyPEM []byte) (*x509.Certificate, *ecdsa.PrivateKey, error) {
 	// Decode certificate
 	certBlock, _ := pem.Decode(certPEM)
 	if certBlock == nil {
-		return nil, fmt.Errorf("failed to decode certificate PEM")
+		return nil, nil, fmt.Errorf("failed to decode certificate PEM")
 	}
 
 	cert, err := x509.ParseCertificate(certBlock.Bytes)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse certificate: %w", err)
+		return nil, nil, fmt.Errorf("failed to parse certificate: %w", err)
 	}
 
 	// Decode private key
 	keyBlock, _ := pem.Decode(keyPEM)
 	if keyBlock == nil {
-		return nil, fmt.Errorf("failed to decode private key PEM")
+		return nil, nil, fmt.Errorf("failed to decode private key PEM")
 	}
 
 	var privateKey *ecdsa.PrivateKey
@@ -122,27 +137,22 @@ func LoadCA(certPEM, keyPEM []byte) (*CACertificate, error) {
 	case "PRIVATE KEY":
 		key, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse PKCS8 private key: %w", err)
+			return nil, nil, fmt.Errorf("failed to parse PKCS8 private key: %w", err)
 		}
 		var ok bool
 		privateKey, ok = key.(*ecdsa.PrivateKey)
 		if !ok {
-			return nil, fmt.Errorf("private key is not ECDSA")
+			return nil, nil, fmt.Errorf("private key is not ECDSA")
 		}
 	default:
-		return nil, fmt.Errorf("unsupported private key type: %s", keyBlock.Type)
+		return nil, nil, fmt.Errorf("unsupported private key type: %s", keyBlock.Type)
 	}
 
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse private key: %w", err)
+		return nil, nil, fmt.Errorf("failed to parse private key: %w", err)
 	}
 
-	return &CACertificate{
-		Certificate: cert,
-		PrivateKey:  privateKey,
-		CertPEM:     certPEM,
-		KeyPEM:      keyPEM,
-	}, nil
+	return cert, privateKey, nil
 }
 
 // generateSerialNumber generates a random serial number for certificate
