@@ -3,106 +3,94 @@ package controller
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
-	"os"
-	"time"
 
-	cfsslconfig "github.com/cloudflare/cfssl/config"
-	"github.com/cloudflare/cfssl/csr"
-	cfssllog "github.com/cloudflare/cfssl/log"
-	"github.com/cloudflare/cfssl/signer"
-	"github.com/cloudflare/cfssl/signer/local"
+	"github.com/yylt/etcdauto/pkg/cert"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrclient "sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
-type SecretConfig struct {
-	Name string `json:"name" yaml:"name"`
-	// secret namespace
-	Namespace string `json:"namespace,omitempty" yaml:"namespace,omitempty"`
-	Profile   struct {
-		Expirey string   `json:"expirey,omitempty" yaml:"expirey,omitempty"`
-		Usage   []string `json:"usage,omitempty" yaml:"usage,omitempty"`
-	} `json:"profile,omitempty" yaml:"profile,omitempty"`
-
-	CaCrtFile string `json:"ca_crtfile,omitempty" yaml:"ca_crtfile,omitempty"`
-	CaKeyFile string `json:"ca_keyfile,omitempty" yaml:"ca_keyfile,omitempty"`
+// CertConfig holds certificate management configuration
+type CertConfig struct {
+	Enabled                bool     `json:"enabled" yaml:"enabled"`
+	CASecretName           string   `json:"caSecretName" yaml:"caSecretName"`
+	CASecretNamespace      string   `json:"caSecretNamespace" yaml:"caSecretNamespace"`
+	MemberSecretName       string   `json:"memberSecretName" yaml:"memberSecretName"`
+	MemberSecretNamespaces []string `json:"memberSecretNamespaces" yaml:"memberSecretNamespaces"`
+	ValidityYears          int      `json:"validityYears" yaml:"validityYears"`
+	Organization           string   `json:"organization" yaml:"organization"`
+	CommonName             string   `json:"commonName" yaml:"commonName"`
 }
 
-var (
-	keyName   = "tls.key"
-	crtName   = "tls.crt"
-	cacrtName = "ca.crt"
-
-	keydict = map[string]struct{}{
-		keyName:   {},
-		crtName:   {},
-		cacrtName: {},
+func (c *CertConfig) Valid() error {
+	if !c.Enabled {
+		return nil
 	}
-)
-
-const (
-	cn = "cli.ecsnode.io"
-)
-
-func init() {
-	cfssllog.Level = cfssllog.LevelError
-}
-
-func (c *SecretConfig) Valid() error {
-	if len(c.Namespace) == 0 {
-		return fmt.Errorf("namespace must not be empty")
+	if c.CASecretName == "" {
+		return fmt.Errorf("caSecretName is required when cert management is enabled")
 	}
-	if len(c.CaCrtFile) == 0 || len(c.CaKeyFile) == 0 {
-		return fmt.Errorf("ca_crtfile and ca_keyfile must not be empty")
+	if c.MemberSecretName == "" {
+		return fmt.Errorf("memberSecretName is required when cert management is enabled")
+	}
+	if len(c.MemberSecretNamespaces) == 0 {
+		return fmt.Errorf("memberSecretNamespaces is required when cert management is enabled")
+	}
+	if c.ValidityYears <= 0 {
+		c.ValidityYears = 100
+	}
+	if c.Organization == "" {
+		c.Organization = "etcdauto"
+	}
+	if c.CommonName == "" {
+		c.CommonName = "etcdauto-ca"
 	}
 	return nil
 }
 
 type SecretSync struct {
-	config *SecretConfig
-	client ctrclient.Client
-
-	sign signer.Signer
+	config    *CertConfig
+	client    ctrclient.Client
+	clientset kubernetes.Interface
+	ca        *cert.CACertificate
 }
 
-func NewSecretSync(config *SecretConfig, mgr manager.Manager) *SecretSync {
-	expiry, err := time.ParseDuration(config.Profile.Expirey)
-	if err != nil {
-		panic(err)
+func NewSecretSync(config *CertConfig, mgr manager.Manager, clientset kubernetes.Interface) *SecretSync {
+	if !config.Enabled {
+		return nil
 	}
-	signprofile := &cfsslconfig.Signing{
-		Profiles: map[string]*cfsslconfig.SigningProfile{},
-		Default: &cfsslconfig.SigningProfile{
-			Usage:        config.Profile.Usage,
-			ExpiryString: config.Profile.Expirey,
-			Expiry:       expiry,
-		},
-	}
-	sign, err := local.NewSignerFromFile(config.CaCrtFile, config.CaKeyFile, signprofile)
-	if err != nil {
-		panic(err)
-	}
+
 	ss := &SecretSync{
-		config: config,
-		client: mgr.GetClient(),
-		sign:   sign,
+		config:    config,
+		client:    mgr.GetClient(),
+		clientset: clientset,
 	}
-	err = ctrl.NewControllerManagedBy(mgr).
-		For(&corev1.Secret{}).
-		WithEventFilter(predicate.NewPredicateFuncs(func(object ctrclient.Object) bool {
-			if object.GetName() == config.Name && object.GetNamespace() == config.Namespace {
+
+	// Watch member secrets in all configured namespaces
+	predicateFn := predicate.NewPredicateFuncs(func(object ctrclient.Object) bool {
+		if object.GetName() != config.MemberSecretName {
+			return false
+		}
+		for _, ns := range config.MemberSecretNamespaces {
+			if object.GetNamespace() == ns {
 				return true
 			}
-			return false
-		})).
+		}
+		return false
+	})
+
+	err := ctrl.NewControllerManagedBy(mgr).
+		For(&corev1.Secret{}).
+		WithEventFilter(predicateFn).
 		Complete(ss)
 	if err != nil {
 		klog.Fatalf("create secret controller failed: %v", err)
@@ -113,76 +101,198 @@ func NewSecretSync(config *SecretConfig, mgr manager.Manager) *SecretSync {
 func (h *SecretSync) NeedLeaderElection() bool { return true }
 
 func (h *SecretSync) Start(ctx context.Context) error {
-	result, err := h.genSecret(ctx)
+	klog.Info("Certificate management is enabled, initializing certificates...")
+
+	// Create secret manager for CA
+	caSecretMgr := cert.NewSecretManager(h.clientset, h.config.CASecretNamespace)
+
+	// Try to load existing CA certificate
+	ca, err := caSecretMgr.LoadCAFromSecret(ctx, h.config.CASecretName)
 	if err != nil {
-		return err
+		klog.Infof("CA certificate not found, generating new CA: %v", err)
+
+		// Generate new CA certificate
+		ca, err = cert.GenerateCA(&cert.CAConfig{
+			CommonName:    h.config.CommonName,
+			Organization:  h.config.Organization,
+			ValidityYears: h.config.ValidityYears,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to generate CA certificate: %w", err)
+		}
+
+		// Create CA secret
+		if err := caSecretMgr.EnsureCASecret(ctx, h.config.CASecretName, ca); err != nil {
+			return fmt.Errorf("failed to create CA secret: %w", err)
+		}
+
+		klog.Infof("Successfully created CA certificate in secret %s/%s", h.config.CASecretNamespace, h.config.CASecretName)
+	} else {
+		klog.Infof("Loaded existing CA certificate from secret %s/%s", h.config.CASecretNamespace, h.config.CASecretName)
 	}
-	klog.Infof("Secret started, result: %s", result)
+
+	// Store CA for later use
+	h.ca = ca
+
+	// Generate and ensure member certificates in all namespaces
+	if err := h.ensureMemberCertificates(ctx); err != nil {
+		return fmt.Errorf("failed to ensure member certificates: %w", err)
+	}
+
+	klog.Info("Certificate initialization completed successfully")
 	return nil
 }
 
 func (h *SecretSync) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	var (
-		se = &corev1.Secret{}
-	)
-	updatefn := func() (ctrl.Result, error) {
-		result, err := h.genSecret(ctx)
-		if err != nil {
-			klog.Errorf("gen secret failed, err: %s", err)
-			return ctrl.Result{RequeueAfter: RequeuDelay}, err
-		}
-		klog.Infof("Secret updated, result: %s", result)
-		return ctrl.Result{}, nil
-	}
-	err := h.client.Get(ctx, req.NamespacedName, se)
+	var se corev1.Secret
+
+	err := h.client.Get(ctx, req.NamespacedName, &se)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return updatefn()
+			// Secret deleted, recreate it
+			klog.Infof("Member secret %s/%s not found, recreating", req.Namespace, req.Name)
+			if err := h.recreateMemberSecret(ctx, req.Namespace); err != nil {
+				klog.Errorf("Failed to recreate member secret: %v", err)
+				return ctrl.Result{RequeueAfter: RequeuDelay}, err
+			}
+			return ctrl.Result{}, nil
 		}
-	}
-	if len(se.Data) != len(keydict) {
-		return updatefn()
+		return ctrl.Result{}, err
 	}
 
-	for k := range keydict {
-		if _, ok := se.Data[k]; !ok {
-			return updatefn()
+	// Validate member certificate against CA
+	needsRecreation := h.validateMemberCert(&se)
+
+	if needsRecreation {
+		klog.Infof("Member certificate %s/%s validation failed, recreating", se.Namespace, se.Name)
+		if err := h.recreateMemberSecret(ctx, se.Namespace); err != nil {
+			klog.Errorf("Failed to recreate member secret: %v", err)
+			return ctrl.Result{RequeueAfter: RequeuDelay}, err
 		}
+		klog.Infof("Successfully recreated member certificate %s/%s", se.Namespace, se.Name)
 	}
 
-	ca, err := os.ReadFile(h.config.CaCrtFile)
-	if err != nil {
-		klog.Errorf("read file '%s' failed, err: %s", h.config.CaCrtFile, err)
-		return updatefn()
-	}
-
-	if !bytes.Equal(se.Data[cacrtName], ca) {
-		return updatefn()
-	}
 	return ctrl.Result{}, nil
 }
 
-func (h *SecretSync) genSecret(ctx context.Context) (controllerutil.OperationResult, error) {
-	var (
-		se = &corev1.Secret{}
-	)
-	se.Name = h.config.Name
-	se.Namespace = h.config.Namespace
-	se.Type = corev1.SecretTypeOpaque
+// ensureMemberCertificates creates member certificates in all configured namespaces
+func (h *SecretSync) ensureMemberCertificates(ctx context.Context) error {
+	// Generate generic client certificate
+	clientCert, err := cert.GenerateMemberCert(h.ca, &cert.MemberCertConfig{
+		CommonName:   "etcd-client",
+		Organization: h.config.Organization,
+		DNSNames: []string{
+			"127.0.0.1", "localhost",
+		},
+		IPAddresses:   []string{"127.0.0.1"},
+		ValidityYears: h.config.ValidityYears,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to generate client certificate: %w", err)
+	}
 
-	csr, key, err := csr.ParseRequest(csr.New())
+	// Create member secrets in all specified namespaces
+	for _, namespace := range h.config.MemberSecretNamespaces {
+		memberSecretMgr := cert.NewSecretManager(h.clientset, namespace)
+
+		if err := memberSecretMgr.EnsureMemberSecret(ctx, h.config.MemberSecretName, h.ca, clientCert); err != nil {
+			return fmt.Errorf("failed to create member secret in namespace %s: %w", namespace, err)
+		}
+
+		klog.Infof("Successfully ensured member certificate in secret %s/%s", namespace, h.config.MemberSecretName)
+	}
+
+	return nil
+}
+
+// validateMemberCert validates that the member certificate matches the CA
+func (h *SecretSync) validateMemberCert(secret *corev1.Secret) bool {
+	// Check if secret has required keys
+	caCertPEM, hasCACert := secret.Data[cert.CACertKey]
+	memberCertPEM, hasMemberCert := secret.Data[cert.MemberCertKey]
+
+	if !hasCACert || !hasMemberCert {
+		klog.Warningf("Member secret %s/%s missing required keys", secret.Namespace, secret.Name)
+		return true
+	}
+
+	// Parse CA certificate from secret
+	caCertBlock, _ := pem.Decode(caCertPEM)
+	if caCertBlock == nil {
+		klog.Warningf("Failed to decode CA certificate PEM in secret %s/%s", secret.Namespace, secret.Name)
+		return true
+	}
+
+	secretCACert, err := x509.ParseCertificate(caCertBlock.Bytes)
 	if err != nil {
-		return controllerutil.OperationResultNone, err
+		klog.Warningf("Failed to parse CA certificate in secret %s/%s: %v", secret.Namespace, secret.Name, err)
+		return true
 	}
-	cert, err := h.sign.Sign(signer.SignRequest{Request: string(csr), Hosts: signer.SplitHosts(cn)})
+
+	// Parse member certificate from secret
+	memberCertBlock, _ := pem.Decode(memberCertPEM)
+	if memberCertBlock == nil {
+		klog.Warningf("Failed to decode member certificate PEM in secret %s/%s", secret.Namespace, secret.Name)
+		return true
+	}
+
+	memberCert, err := x509.ParseCertificate(memberCertBlock.Bytes)
 	if err != nil {
-		return controllerutil.OperationResultNone, err
+		klog.Warningf("Failed to parse member certificate in secret %s/%s: %v", secret.Namespace, secret.Name, err)
+		return true
 	}
-	ca, _ := os.ReadFile(h.config.CaCrtFile)
-	se.Data = map[string][]byte{
-		cacrtName: ca,
-		crtName:   cert,
-		keyName:   key,
+
+	// Compare CA certificate in secret with current CA
+	if !bytes.Equal(secretCACert.Raw, h.ca.Certificate.Raw) {
+		klog.Warningf("CA certificate mismatch in secret %s/%s", secret.Namespace, secret.Name)
+		return true
 	}
-	return controllerutil.CreateOrUpdate(ctx, h.client, se, nil)
+
+	// Verify member certificate was signed by the CA
+	roots := x509.NewCertPool()
+	roots.AddCert(h.ca.Certificate)
+
+	opts := x509.VerifyOptions{
+		Roots:     roots,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+	}
+
+	if _, err := memberCert.Verify(opts); err != nil {
+		klog.Warningf("Member certificate verification failed in secret %s/%s: %v", secret.Namespace, secret.Name, err)
+		return true
+	}
+
+	return false
+}
+
+// recreateMemberSecret deletes and recreates a member secret
+func (h *SecretSync) recreateMemberSecret(ctx context.Context, namespace string) error {
+	memberSecretMgr := cert.NewSecretManager(h.clientset, namespace)
+
+	// Delete existing secret
+	err := h.clientset.CoreV1().Secrets(namespace).Delete(ctx, h.config.MemberSecretName, metav1.DeleteOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("failed to delete member secret: %w", err)
+	}
+
+	// Generate new member certificate
+	clientCert, err := cert.GenerateMemberCert(h.ca, &cert.MemberCertConfig{
+		CommonName:   "etcd-client",
+		Organization: h.config.Organization,
+		DNSNames: []string{
+			"127.0.0.1", "localhost",
+		},
+		IPAddresses:   []string{"127.0.0.1"},
+		ValidityYears: h.config.ValidityYears,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to generate member certificate: %w", err)
+	}
+
+	// Create new secret
+	if err := memberSecretMgr.EnsureMemberSecret(ctx, h.config.MemberSecretName, h.ca, clientCert); err != nil {
+		return fmt.Errorf("failed to create member secret: %w", err)
+	}
+
+	return nil
 }
