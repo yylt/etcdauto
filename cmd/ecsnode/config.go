@@ -45,17 +45,18 @@ func ApplyDefault(newcfg *Config, defaultns string) error {
 		if newcfg.Cert.CASecretNamespace == "" {
 			newcfg.Cert.CASecretNamespace = defaultns
 		}
-		// Ensure CA namespace is in member namespaces
+		// Ensure CA namespace is in client namespaces
 		found := false
-		for _, ns := range newcfg.Cert.MemberSecretNamespaces {
+		for _, ns := range newcfg.Cert.ClientSecretNamespaces {
 			if ns == newcfg.Cert.CASecretNamespace {
 				found = true
 				break
 			}
 		}
 		if !found {
-			newcfg.Cert.MemberSecretNamespaces = append(newcfg.Cert.MemberSecretNamespaces, newcfg.Cert.CASecretNamespace)
+			newcfg.Cert.ClientSecretNamespaces = append(newcfg.Cert.ClientSecretNamespaces, newcfg.Cert.CASecretNamespace)
 		}
+		// Validate will initialize the namespace set
 		if err := newcfg.Cert.Valid(); err != nil {
 			return fmt.Errorf("cert config is invalid: %w", err)
 		}

@@ -13,25 +13,25 @@ import (
 	"time"
 )
 
-// MemberCertConfig holds member certificate configuration
-type MemberCertConfig struct {
-	CommonName    string   // Member common name (e.g., pod name)
+// ClientCertConfig holds client certificate configuration
+type ClientCertConfig struct {
+	CommonName    string   // Client common name (e.g., pod name)
 	Organization  string   // Organization name
 	DNSNames      []string // DNS names for the certificate
 	IPAddresses   []string // IP addresses for the certificate
 	ValidityYears int      // Certificate validity in years
 }
 
-// MemberCertificate holds member certificate and private key
-type MemberCertificate struct {
+// ClientCertificate holds client certificate and private key
+type ClientCertificate struct {
 	Certificate *x509.Certificate
 	PrivateKey  *ecdsa.PrivateKey
 	CertPEM     []byte
 	KeyPEM      []byte
 }
 
-// GenerateMemberCert generates a member certificate signed by the CA
-func GenerateMemberCert(ca *CACertificate, cfg *MemberCertConfig) (*MemberCertificate, error) {
+// GenerateClientCert generates a client certificate signed by the CA
+func GenerateClientCert(ca *CACertificate, cfg *ClientCertConfig) (*ClientCertificate, error) {
 	// Generate private key
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -99,7 +99,7 @@ func GenerateMemberCert(ca *CACertificate, cfg *MemberCertConfig) (*MemberCertif
 		Bytes: keyBytes,
 	})
 
-	return &MemberCertificate{
+	return &ClientCertificate{
 		Certificate: cert,
 		PrivateKey:  privateKey,
 		CertPEM:     certPEM,
@@ -107,14 +107,14 @@ func GenerateMemberCert(ca *CACertificate, cfg *MemberCertConfig) (*MemberCertif
 	}, nil
 }
 
-// LoadMemberCert loads member certificate and private key from PEM data
-func LoadMemberCert(certPEM, keyPEM []byte) (*MemberCertificate, error) {
+// LoadClientCert loads client certificate and private key from PEM data
+func LoadClientCert(certPEM, keyPEM []byte) (*ClientCertificate, error) {
 	cert, privateKey, err := loadCertAndKey(certPEM, keyPEM)
 	if err != nil {
 		return nil, err
 	}
 
-	return &MemberCertificate{
+	return &ClientCertificate{
 		Certificate: cert,
 		PrivateKey:  privateKey,
 		CertPEM:     certPEM,
