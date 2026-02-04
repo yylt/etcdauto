@@ -16,8 +16,8 @@ const (
 	// Secret data keys
 	CACertKey     = "ca.pem"
 	CAKeyKey      = "ca-key.pem"
-	MemberCertKey = "member.pem"
-	MemberKeyKey  = "member-key.pem"
+	ClientCertKey = "client.pem"
+	ClientKeyKey  = "client-key.pem"
 
 	// Annotation keys for certificate metadata
 	AnnotationCreatedAt    = "etcdauto.io/cert-created-at"
@@ -95,20 +95,20 @@ func (sm *SecretManager) EnsureCASecret(ctx context.Context, secretName string, 
 	return nil
 }
 
-// EnsureMemberSecret ensures member certificate secret exists
+// EnsureClientSecret ensures client certificate secret exists
 // If the secret already exists, it will NOT be updated or deleted
-func (sm *SecretManager) EnsureMemberSecret(ctx context.Context, secretName string, ca *CACertificate, member *MemberCertificate) error {
+func (sm *SecretManager) EnsureClientSecret(ctx context.Context, secretName string, ca *CACertificate, client *ClientCertificate) error {
 	// Check if secret already exists
 	existing, err := sm.client.CoreV1().Secrets(sm.namespace).Get(ctx, secretName, metav1.GetOptions{})
 	if err == nil {
 		// Secret exists, do not update
-		klog.Infof("Member secret %s/%s already exists, skipping creation", sm.namespace, secretName)
+		klog.Infof("Client secret %s/%s already exists, skipping creation", sm.namespace, secretName)
 
 		// Verify the existing secret has required keys
-		requiredKeys := []string{CACertKey, MemberCertKey, MemberKeyKey}
+		requiredKeys := []string{CACertKey, ClientCertKey, ClientKeyKey}
 		for _, key := range requiredKeys {
 			if _, ok := existing.Data[key]; !ok {
-				return fmt.Errorf("existing member secret missing %s key", key)
+				return fmt.Errorf("existing client secret missing %s key", key)
 			}
 		}
 
@@ -116,7 +116,7 @@ func (sm *SecretManager) EnsureMemberSecret(ctx context.Context, secretName stri
 	}
 
 	if !apierrors.IsNotFound(err) {
-		return fmt.Errorf("failed to check member secret: %w", err)
+		return fmt.Errorf("failed to check client secret: %w", err)
 	}
 
 	// Secret doesn't exist, create it
@@ -126,32 +126,32 @@ func (sm *SecretManager) EnsureMemberSecret(ctx context.Context, secretName stri
 			Namespace: sm.namespace,
 			Annotations: map[string]string{
 				AnnotationCreatedAt:    time.Now().Format(time.RFC3339),
-				AnnotationExpiresAt:    member.Certificate.NotAfter.Format(time.RFC3339),
+				AnnotationExpiresAt:    client.Certificate.NotAfter.Format(time.RFC3339),
 				AnnotationRotationFlag: "false", // Reserved for future rotation feature
 			},
 			Labels: map[string]string{
 				"app.kubernetes.io/name":       "etcd",
-				"app.kubernetes.io/component":  "member-certificate",
+				"app.kubernetes.io/component":  "client-certificate",
 				"app.kubernetes.io/managed-by": "etcdauto",
 			},
 		},
 		Type: corev1.SecretTypeTLS,
 		Data: map[string][]byte{
 			CACertKey:     ca.CertPEM,
-			MemberCertKey: member.CertPEM,
-			MemberKeyKey:  member.KeyPEM,
+			ClientCertKey: client.CertPEM,
+			ClientKeyKey:  client.KeyPEM,
 			// Also add standard TLS secret keys for compatibility
-			corev1.TLSCertKey:       member.CertPEM,
-			corev1.TLSPrivateKeyKey: member.KeyPEM,
+			corev1.TLSCertKey:       client.CertPEM,
+			corev1.TLSPrivateKeyKey: client.KeyPEM,
 		},
 	}
 
 	_, err = sm.client.CoreV1().Secrets(sm.namespace).Create(ctx, secret, metav1.CreateOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to create member secret: %w", err)
+		return fmt.Errorf("failed to create client secret: %w", err)
 	}
 
-	klog.Infof("Successfully created member secret %s/%s", sm.namespace, secretName)
+	klog.Infof("Successfully created client secret %s/%s", sm.namespace, secretName)
 	return nil
 }
 
