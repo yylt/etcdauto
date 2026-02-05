@@ -41,24 +41,39 @@ type EndpointInfo struct {
 
 // DiscoverEndpoints discovers alive and dead etcd endpoints
 func DiscoverEndpoints(cfg *DiscoveryConfig) (*EndpointInfo, error) {
+	klog.Infof("Starting endpoint discovery: prefix=%s, maxNodes=%d, myIndex=%d",
+		cfg.Prefix, cfg.MaxNodes, cfg.MyIndex)
+
 	info := &EndpointInfo{
 		AliveEndpoints: make(map[string][]string),
 		DeadNames:      make(map[string]struct{}),
 	}
 
 	// Load client cert for health checks
+	klog.V(2).Infof("Loading TLS config from cert: %s, key: %s", cfg.CertFile, cfg.KeyFile)
 	tlscfg, err := loadTLSConfig(cfg.CertFile, cfg.KeyFile)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to load TLS config: %w", err)
 	}
+	klog.V(2).Info("TLS config loaded successfully")
 
 	// Try to get pod IPs from Kubernetes API
+	klog.V(2).Infof("Fetching pod IP mapping from Kubernetes API: namespace=%s, labels=%s",
+		cfg.Namespace, cfg.Labels)
 	podip, fromdns := getPodIPMapping(cfg.Namespace, cfg.Labels)
+	if fromdns {
+		klog.Info("Using DNS-based discovery (Kubernetes API unavailable)")
+	} else {
+		klog.Infof("Using Kubernetes API-based discovery, found %d pods", len(podip))
+	}
 
 	// Check each pod
 	checkPods(cfg, info, tlscfg, podip, fromdns)
 
-	klog.Infof("Total endpoints info, alive: '%v', dead: '%v'", info.AliveEndpoints, info.DeadNames)
+	klog.Infof("Endpoint discovery complete: %d alive, %d dead",
+		len(info.AliveEndpoints), len(info.DeadNames))
+	klog.V(2).Infof("Alive endpoints: %v", info.AliveEndpoints)
+	klog.V(2).Infof("Dead endpoints: %v", getMapKeys(info.DeadNames))
 	return info, nil
 }
 
@@ -139,10 +154,13 @@ func checkPodHealth(podname string, iplist []string, clientPort string, tlscfg *
 	defer wg.Done()
 	var ready bool
 
+	klog.V(2).Infof("Checking health for pod %s with IPs: %v", podname, iplist)
+
 	// Check if node is healthy
 	for _, ip := range iplist {
 		ipport := net.JoinHostPort(ip, clientPort)
 		if checkReadyz(ipport, tlscfg) {
+			klog.V(2).Infof("Pod %s is healthy at %s", podname, ipport)
 			ready = true
 			break
 		}
@@ -152,9 +170,20 @@ func checkPodHealth(podname string, iplist []string, clientPort string, tlscfg *
 	defer mu.Unlock()
 	if ready {
 		info.AliveEndpoints[podname] = iplist
+		klog.Infof("Pod %s marked as alive with IPs: %v", podname, iplist)
 	} else {
 		info.DeadNames[podname] = struct{}{}
+		klog.Infof("Pod %s marked as dead", podname)
 	}
+}
+
+// getMapKeys returns keys from a map as a slice
+func getMapKeys(m map[string]struct{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // getPodIPsFromK8s retrieves pod IPs from Kubernetes API
@@ -233,22 +262,23 @@ func checkReadyz(ipport string, tlscfg *tls.Config) bool {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		klog.Errorf("Failed to create request %s: %v", url, err)
+		klog.V(2).Infof("Failed to create request for %s: %v", url, err)
 		return false
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		klog.Errorf("Failed to check health %s", url)
+		klog.V(2).Infof("Health check failed for %s: %v", ipport, err)
 		return false
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusOK {
+		klog.V(2).Infof("Health check passed for %s", ipport)
 		return true
 	}
 
-	klog.Warningf("Etcd node is not ready, ipport: %s, statusCode: %d", ipport, resp.StatusCode)
+	klog.V(2).Infof("Health check failed for %s: status code %d", ipport, resp.StatusCode)
 	return false
 }
 
@@ -268,4 +298,20 @@ func BuildPeerEndpoints(endpoints map[string][]string, port string, withName, wi
 		}
 	}
 	return addresses
+}
+
+// GetAllDiscoveredIPs returns all discovered IPs from endpoint info
+func GetAllDiscoveredIPs(info *EndpointInfo) []string {
+	ipSet := make(map[string]bool)
+	for _, iplist := range info.AliveEndpoints {
+		for _, ip := range iplist {
+			ipSet[ip] = true
+		}
+	}
+
+	ips := make([]string, 0, len(ipSet))
+	for ip := range ipSet {
+		ips = append(ips, ip)
+	}
+	return ips
 }

@@ -103,6 +103,35 @@ func SetupEnvironment(cfg *EnvConfig) error {
 	return nil
 }
 
+// WriteEtcdctlEnvFile writes etcdctl environment variables to a file for easy debugging
+// Users can source this file to use etcdctl: source /run/etcd/env && etcdctl member list
+func WriteEtcdctlEnvFile(cfg *EnvConfig, filePath string) error {
+	var sb strings.Builder
+
+	sb.WriteString("#!/bin/bash\n")
+	sb.WriteString("# etcdctl environment configuration\n")
+	sb.WriteString("# Usage: source /run/etcd/env && etcdctl member list\n\n")
+
+	// etcdctl required environment variables
+	sb.WriteString("export ETCDCTL_API=3\n")
+	sb.WriteString(fmt.Sprintf("export ETCDCTL_CACERT=%s/ca.pem\n", cfg.CertDir))
+	sb.WriteString(fmt.Sprintf("export ETCDCTL_CERT=%s/%s.pem\n", cfg.CertDir, cfg.PodName))
+	sb.WriteString(fmt.Sprintf("export ETCDCTL_KEY=%s/%s-key.pem\n", cfg.CertDir, cfg.PodName))
+	sb.WriteString(fmt.Sprintf("export ETCDCTL_ENDPOINTS=https://127.0.0.1:%s\n", cfg.ClientPort))
+
+	// Write all client URLs as comment for reference
+	if len(cfg.ClientURLs) > 0 {
+		sb.WriteString(fmt.Sprintf("\n# All cluster endpoints: %s\n", strings.Join(cfg.ClientURLs, ",")))
+	}
+
+	if err := os.WriteFile(filePath, []byte(sb.String()), 0644); err != nil {
+		return fmt.Errorf("failed to write etcdctl env file: %w", err)
+	}
+
+	klog.Infof("etcdctl environment file written to: %s", filePath)
+	return nil
+}
+
 // CreateDirectories creates required directories for etcd
 func CreateDirectories(dataDir, certDir string) error {
 	dirs := []string{dataDir, certDir}

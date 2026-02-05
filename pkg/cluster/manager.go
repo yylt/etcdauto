@@ -81,17 +81,28 @@ func (m *Manager) GetClient(aliveEndpoints map[string][]string) (etcdcli.Cluster
 
 // InitializeNewCluster initializes a new etcd cluster
 func (m *Manager) InitializeNewCluster(myIPs []string, etcdBin string) (*exec.Cmd, error) {
-	klog.Info("Initializing new etcd cluster")
+	klog.Infof("=== Initializing new etcd cluster ===")
+	klog.Infof("Pod name: %s", m.cfg.PodName)
+	klog.Infof("My IPs: %v", myIPs)
+	klog.Infof("Data directory: %s", m.cfg.DataDir)
 
 	os.Setenv("ETCD_INITIAL_CLUSTER_STATE", "new")
+	klog.V(2).Info("Set ETCD_INITIAL_CLUSTER_STATE=new")
 
 	cluster := BuildPeerEndpoints(
 		map[string][]string{m.cfg.PodName: myIPs},
 		m.cfg.PeerPort,
 		true, true)
 
-	os.Setenv("ETCD_INITIAL_CLUSTER", strings.Join(cluster, ","))
-	os.RemoveAll(filepath.Join(m.cfg.DataDir, "member"))
+	clusterStr := strings.Join(cluster, ",")
+	os.Setenv("ETCD_INITIAL_CLUSTER", clusterStr)
+	klog.Infof("Initial cluster configuration: %s", clusterStr)
+
+	memberDir := filepath.Join(m.cfg.DataDir, "member")
+	if util.DirExists(memberDir) {
+		klog.Warningf("Removing existing member directory: %s", memberDir)
+		os.RemoveAll(memberDir)
+	}
 
 	klog.Info("Starting etcd with new cluster configuration")
 	return m.startEtcd(etcdBin)
@@ -99,107 +110,121 @@ func (m *Manager) InitializeNewCluster(myIPs []string, etcdBin string) (*exec.Cm
 
 // JoinExistingCluster joins an existing etcd cluster
 func (m *Manager) JoinExistingCluster(client etcdcli.Cluster, myIPs []string, deadnames map[string]struct{}, etcdBin string) (*exec.Cmd, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
+	klog.Infof("=== Joining existing etcd cluster ===")
+	klog.Infof("Pod name: %s", m.cfg.PodName)
+	klog.Infof("My IPs: %v", myIPs)
+	klog.Infof("Dead members to remove: %v", getDeadNames(deadnames))
 
+	ctx := context.Background()
+
+	klog.V(2).Info("Fetching current cluster member list")
 	resp, err := client.MemberList(etcdcli.WithRequireLeader(ctx))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to list members: %w", err)
 	}
 
-	// Check if current pod is already in cluster and handle it
-	myMemberID, nonLearn, err := m.handleExistingMember(client, resp.Members, etcdBin)
-	if err != nil {
-		return nil, err
-	}
+	myMemberID, myIsLearner, aliveNumExceptMe := m.processMembers(ctx, client, resp.Members, deadnames)
 
-	// Remove dead members
-	if err := m.removeDeadMembers(client, resp.Members, deadnames); err != nil {
-		return nil, err
-	}
-
-	// Must remove member if data doesn't exist but member exists
-	if err := m.removeMemberWithoutData(client, myMemberID); err != nil {
-		return nil, err
-	}
-
-	os.RemoveAll(filepath.Join(m.cfg.DataDir, "member"))
-	os.Setenv("ETCD_INITIAL_CLUSTER_STATE", "existing")
-
-	// Add member and start etcd
-	return m.addMemberAndStart(client, myIPs, resp.Members, nonLearn, etcdBin)
+	// Handle existing member or add new member
+	return m.handleMemberJoin(ctx, client, myMemberID, myIsLearner, myIPs, aliveNumExceptMe, etcdBin)
 }
 
-// handleExistingMember checks if current pod is already in cluster and handles it
-func (m *Manager) handleExistingMember(client etcdcli.Cluster, members []*pb.Member, etcdBin string) (uint64, int, error) {
-	var myMemberID uint64
-	var nonLearn int
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
+// processMembers processes the member list, removes dead members, and finds current pod
+func (m *Manager) processMembers(ctx context.Context, client etcdcli.Cluster, members []*pb.Member, deadnames map[string]struct{}) (uint64, bool, int) {
+	var (
+		myMemberID       uint64
+		myIsLearner      bool
+		aliveNumExceptMe int
+	)
 
 	for _, member := range members {
-		if member.Name != m.cfg.PodName {
+		if member.Name == m.cfg.PodName {
+			myMemberID = member.ID
+			myIsLearner = member.GetIsLearner()
+			klog.Infof("Found myself in cluster: ID=%016x, IsLearner=%v", member.ID, member.IsLearner)
 			continue
 		}
-		myMemberID = member.ID
-		if util.DirExists(filepath.Join(m.cfg.DataDir, "member")) {
-			if member.GetIsLearner() {
-				_, err := client.MemberPromote(ctx, myMemberID)
-				if err != nil {
-					return 0, 0, err
-				}
-			}
-			klog.Info("memberdir exists, and i'm in cluster, start etcd")
-			cmd, err := m.startEtcd(etcdBin)
-			if err != nil {
-				return 0, 0, err
-			}
-			// Exit early by waiting for the command
-			return 0, 0, cmd.Wait()
-		}
 
-		if !member.IsLearner {
-			nonLearn++
-		}
-	}
-
-	return myMemberID, nonLearn, nil
-}
-
-// removeDeadMembers removes dead members from the cluster
-func (m *Manager) removeDeadMembers(client etcdcli.Cluster, members []*pb.Member, deadnames map[string]struct{}) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	for _, member := range members {
+		// Handle other members
 		if _, ok := deadnames[member.Name]; ok {
-			klog.Infof("member '%s' had dead but in cluster, remove it", member.Name)
-			_, err := client.MemberRemove(ctx, member.ID)
-			if err != nil {
-				return err
-			}
+			m.removeDeadMember(ctx, client, member)
+		} else {
+			aliveNumExceptMe++
 		}
 	}
-	return nil
+
+	return myMemberID, myIsLearner, aliveNumExceptMe
 }
 
-// removeMemberWithoutData removes member if data doesn't exist but member exists
-func (m *Manager) removeMemberWithoutData(client etcdcli.Cluster, myMemberID uint64) error {
+// removeDeadMember removes a dead member from the cluster
+func (m *Manager) removeDeadMember(ctx context.Context, client etcdcli.Cluster, member *pb.Member) {
+	klog.Infof("Removing dead member: ID=%016x, Name=%s", member.ID, member.Name)
+	_, err := client.MemberRemove(ctx, member.ID)
+	if err != nil {
+		klog.Errorf("failed to remove member %s (%016x): %s", member.Name, member.ID, err)
+	} else {
+		klog.Infof("Successfully removed dead member %s", member.Name)
+	}
+}
+
+// handleMemberJoin handles joining logic based on member state
+func (m *Manager) handleMemberJoin(ctx context.Context, client etcdcli.Cluster, myMemberID uint64, myIsLearner bool, myIPs []string, aliveNumExceptMe int, etcdBin string) (*exec.Cmd, error) {
+	dataDir := filepath.Join(m.cfg.DataDir, "member")
+
 	if myMemberID != 0 {
-		klog.Infof("%s(%04d...) in cluster, but data not exist, should remove then rejoin", m.cfg.PodName, myMemberID)
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		_, err := client.MemberRemove(ctx, myMemberID)
+		if util.DirExists(dataDir) {
+			return m.handleExistingMemberWithData(client, myMemberID, myIsLearner, etcdBin)
+		}
+		return m.handleExistingMemberWithoutData(ctx, client, myMemberID, myIPs, aliveNumExceptMe, etcdBin)
+	}
+
+	if util.DirExists(dataDir) {
+		klog.Infof("not found myid, but dataDir exists at %s, will remove it", dataDir)
+		os.RemoveAll(dataDir)
+	}
+
+	// Add member and start etcd
+	return m.addMemberAndStart(client, myIPs, aliveNumExceptMe, etcdBin)
+}
+
+// handleExistingMemberWithData handles case where member exists in cluster and has data
+func (m *Manager) handleExistingMemberWithData(client etcdcli.Cluster, myMemberID uint64, myIsLearner bool, etcdBin string) (*exec.Cmd, error) {
+	dataDir := filepath.Join(m.cfg.DataDir, "member")
+	klog.Infof("my id=%016x, IsLearner=%v, dataDir exists at %s", myMemberID, myIsLearner, dataDir)
+
+	if myIsLearner {
+		err := m.promoteLearner(client, myMemberID)
 		if err != nil {
-			return err
+			return nil, fmt.Errorf("failed to promote learner: %w", err)
 		}
 	}
-	return nil
+	return m.startEtcd(etcdBin)
+}
+
+// handleExistingMemberWithoutData handles case where member exists in cluster but has no data
+func (m *Manager) handleExistingMemberWithoutData(ctx context.Context, client etcdcli.Cluster, myMemberID uint64, myIPs []string, aliveNumExceptMe int, etcdBin string) (*exec.Cmd, error) {
+	_, err := client.MemberRemove(ctx, myMemberID)
+	if err != nil {
+		klog.Errorf("failed to remove my by id(%016x): %s", myMemberID, err)
+		return nil, err
+	}
+	klog.Infof("Successfully removed member %016x, will rejoin as new member", myMemberID)
+
+	// Add member and start etcd
+	return m.addMemberAndStart(client, myIPs, aliveNumExceptMe, etcdBin)
+}
+
+// getDeadNames converts dead names map to slice for logging
+func getDeadNames(deadnames map[string]struct{}) []string {
+	names := make([]string, 0, len(deadnames))
+	for name := range deadnames {
+		names = append(names, name)
+	}
+	return names
 }
 
 // addMemberAndStart adds member to cluster and starts etcd
-func (m *Manager) addMemberAndStart(client etcdcli.Cluster, myIPs []string, members []*pb.Member, nonLearn int, etcdBin string) (*exec.Cmd, error) {
+func (m *Manager) addMemberAndStart(client etcdcli.Cluster, myIPs []string, alive int, etcdBin string) (*exec.Cmd, error) {
 	// Build peer URLs
 	mypeers := make([]string, 0, len(myIPs))
 	for _, ip := range myIPs {
@@ -212,39 +237,59 @@ func (m *Manager) addMemberAndStart(client etcdcli.Cluster, myIPs []string, memb
 	// Add member as learner or regular member
 	var addResp *etcdcli.MemberAddResponse
 	var err error
+	var shouldPromote bool
 
-	if len(members) != 1 {
-		if nonLearn == 1 {
-			klog.Info("member count > 1, but non learner is 1")
-			return nil, fmt.Errorf("non learner is 1")
-		}
-		klog.Info("add member then start etcd")
-		addResp, err = client.MemberAdd(ctx, mypeers)
-	} else {
-		klog.Info("one master, start etcd as learner then promote")
+	// Decision logic based on cluster state:
+	// 1. If only 1 non-learner member exists: add as learner, then promote after etcd starts
+	// 2. If multiple non-learner members but only 1 would remain: reject (quorum protection)
+	// 3. Otherwise: add as regular member
+	switch {
+	case alive == 1:
+		klog.Infof("adding %s as learner then will promote", m.cfg.PodName)
 		addResp, err = client.MemberAddAsLearner(ctx, mypeers)
+		shouldPromote = true
+	case alive > 1:
+		// Check if adding would leave only 1 non-learner (shouldn't happen in normal flow)
+		klog.Infof("adding %s to cluster then start etcd", m.cfg.PodName)
+		addResp, err = client.MemberAdd(ctx, mypeers)
+	default:
+		// nonLearn == 0, this shouldn't happen in a healthy cluster
+		klog.Warning("Cluster has no non-learner members, this is an unhealthy state")
+		return nil, fmt.Errorf("cluster has no non-learner members, cannot add new member safely")
 	}
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to add member: %w", err)
 	}
+	klog.Infof("Add to cluster successfully: ID=%016x, Name=%s, IsLearner=%v",
+		addResp.Member.ID, m.cfg.PodName, addResp.Member.IsLearner)
 
 	// Build cluster configuration
 	cluster := m.buildClusterConfig(addResp.Members)
-	os.Setenv("ETCD_INITIAL_CLUSTER", strings.Join(cluster, ","))
+	clusterStr := strings.Join(cluster, ",")
+
+	os.Setenv("ETCD_INITIAL_CLUSTER_STATE", "existing")
+	os.Setenv("ETCD_INITIAL_CLUSTER", clusterStr)
+	klog.Infof("Cluster configuration: %s", clusterStr)
 
 	cmd, err := m.startEtcd(etcdBin)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to start etcd: %w", err)
 	}
 
-	// Promote learner if single master
-	if len(members) == 1 {
+	// Promote learner after etcd starts (following README workflow)
+	if shouldPromote {
+		klog.Infof("Promoting learner member %016x to voting member", addResp.Member.ID)
 		if err := m.promoteLearner(client, addResp.Member.ID); err != nil {
-			return nil, cmd.Process.Signal(syscall.SIGTERM)
+			klog.Errorf("Failed to promote learner: %v, terminating etcd", err)
+			if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+				klog.Errorf("Failed to send SIGTERM to etcd process: %v", err)
+			}
+			return nil, fmt.Errorf("failed to promote learner: %w", err)
 		}
 	}
 
+	klog.Info("Member successfully joined cluster and etcd started")
 	return cmd, nil
 }
 
@@ -264,17 +309,28 @@ func (m *Manager) buildClusterConfig(members []*pb.Member) []string {
 
 // promoteLearner promotes a learner member to voting member
 func (m *Manager) promoteLearner(client etcdcli.Cluster, memberID uint64) error {
-	count := 1
-	for count < 10 {
-		time.Sleep(2 * time.Second)
-		_, err := client.MemberPromote(context.Background(), memberID)
+	const maxRetries = 100
+	const retryInterval = 200 * time.Millisecond
+
+	var ctx = context.Background()
+	klog.Infof("Starting learner promotion for member %016x (max retries: %d)", memberID, maxRetries)
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		if attempt > 1 {
+			klog.V(2).Infof("Retry attempt %d/%d for promoting member %016x", attempt, maxRetries, memberID)
+			time.Sleep(retryInterval)
+		}
+		_, err := client.MemberPromote(ctx, memberID)
+
 		if err == nil {
-			klog.Infof("promote member '%s' success", m.cfg.PodName)
+			klog.Infof("Successfully promoted learner member %016x to voting member", memberID)
 			return nil
 		}
-		count++
+
+		klog.Warningf("Failed to promote member %016x (attempt %d/%d): %v", memberID, attempt, maxRetries, err)
 	}
-	return fmt.Errorf("failed to promote member after 10 attempts")
+
+	return fmt.Errorf("failed to promote member %016x after %d attempts", memberID, maxRetries)
 }
 
 // startEtcd starts the etcd process
