@@ -46,44 +46,12 @@ func ExtractNetworkInfo(cfg *NetworkConfig) (*NetworkInfo, error) {
 // extractIPsFromInterfaces extracts IPs from the given interfaces
 func extractIPsFromInterfaces(cfg *NetworkConfig, info *NetworkInfo) {
 	for _, ifaceName := range cfg.Interfaces {
-		iface, err := net.InterfaceByName(ifaceName)
+		ipStr, err := GetInterfaceIP(ifaceName)
 		if err != nil {
 			klog.Warningf("Failed to get interface %s: %v", ifaceName, err)
 			continue
 		}
 
-		addrs, err := iface.Addrs()
-		if err != nil {
-			klog.Warningf("Failed to get addresses for interface %s: %v", ifaceName, err)
-			continue
-		}
-
-		processInterfaceAddresses(addrs, ifaceName, cfg, info)
-	}
-}
-
-// processInterfaceAddresses processes addresses for a single interface
-func processInterfaceAddresses(addrs []net.Addr, _ string, cfg *NetworkConfig, info *NetworkInfo) {
-	for _, addr := range addrs {
-		var ip net.IP
-		var ones, bits int
-		switch v := addr.(type) {
-		case *net.IPNet:
-			ip = v.IP
-			ones, bits = v.Mask.Size()
-		case *net.IPAddr:
-			ip = v.IP
-		}
-
-		// Only use IPv4 addresses
-		if ip == nil || ip.To4() == nil {
-			continue
-		}
-		if bits == 32 && ones == 32 {
-			continue
-		}
-
-		ipStr := ip.String()
 		info.IPs = append(info.IPs, ipStr)
 
 		// Build URLs
@@ -110,17 +78,23 @@ func GetInterfaceIP(ifaceName string) (string, error) {
 
 	for _, addr := range addrs {
 		var ip net.IP
+		var ones, bits int
 		switch v := addr.(type) {
 		case *net.IPNet:
 			ip = v.IP
+			ones, bits = v.Mask.Size()
 		case *net.IPAddr:
 			ip = v.IP
 		}
 
 		// Only use IPv4 addresses
-		if ip != nil && ip.To4() != nil {
-			return ip.String(), nil
+		if ip == nil || ip.To4() == nil {
+			continue
 		}
+		if bits == 32 && ones == 32 {
+			continue
+		}
+		return ip.String(), nil
 	}
 
 	return "", fmt.Errorf("no IPv4 address found on interface %s", ifaceName)

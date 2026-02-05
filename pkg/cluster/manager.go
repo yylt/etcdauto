@@ -145,8 +145,23 @@ func (m *Manager) processMembers(ctx context.Context, client etcdcli.Cluster, me
 			continue
 		}
 
-		// Handle other members
-		if _, ok := deadnames[member.Name]; ok {
+		// Check if member's PeerURLs contain any dead master IP
+		shouldRemove := false
+		for _, peerURL := range member.PeerURLs {
+			for deadMasterIP := range deadnames {
+				if strings.Contains(peerURL, deadMasterIP) {
+					klog.Infof("Member %s (ID=%016x) has dead master IP %s in PeerURL: %s",
+						member.Name, member.ID, deadMasterIP, peerURL)
+					shouldRemove = true
+					break
+				}
+			}
+			if shouldRemove {
+				break
+			}
+		}
+
+		if shouldRemove {
 			m.removeDeadMember(ctx, client, member)
 		} else {
 			aliveNumExceptMe++

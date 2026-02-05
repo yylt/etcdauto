@@ -2,26 +2,146 @@
 
 ## 概述
 
-这是一个用于在 Kubernetes 环境中自动启动和管理 etcd 集群的工具。它能够根据当前集群状态自动决定是初始化新集群、加入现有集群，还是以学习者（learner）身份加入，并确保集群的高可用性和数据一致性。
+这是一个用于在 Kubernetes 环境中自动启动和管理 etcd 集群的工具套件，包含两个核心组件：
 
-## 核心功能
+1. **etcdcluster**：etcd 集群自动启动 sidecar，负责 etcd 进程的智能启动和集群管理
+2. **etcdnode**：Kubernetes 控制器，负责节点网络信息同步和资源协调
 
-### 1. 集群状态检测
-- 通过 Kubernetes API 或 DNS 解析发现其他 etcd 节点
-- 使用健康检查（/readyz 端点）判断节点状态
-- 区分活跃节点和死亡节点
+这两个组件协同工作，实现 etcd 集群的全自动化部署和管理，确保集群的高可用性和数据一致性。
 
-### 2. 智能启动决策
-- **场景 1：无活跃节点** - 第一个节点（索引 0）初始化新集群
-- **场景 2：有活跃节点** - 其他节点加入现有集群
-- **场景 3：单主节点** - 以学习者身份加入然后升级为正式成员
+## 组件架构
 
-### 3. 故障恢复机制
-- 自动移除死亡节点
-- 重新加入数据丢失的成员
-- 学习者自动晋升
+### etcdcluster（Sidecar 容器）
 
-## 环境变量要求
+etcd 集群自动启动 sidecar，作为 etcd StatefulSet 的 sidecar 容器运行，负责：
+
+#### 核心功能
+
+1. **集群状态检测**
+   - 通过 Kubernetes API 或 DNS 解析发现其他 etcd 节点
+   - 使用健康检查（/readyz 端点）判断节点状态
+   - 区分活跃节点和死亡节点
+
+2. **智能启动决策**
+   - **场景 1：无活跃节点** - 第一个节点（索引 0）初始化新集群
+   - **场景 2：有活跃节点** - 其他节点加入现有集群
+   - **场景 3：单主节点** - 以学习者身份加入然后升级为正式成员
+
+3. **故障恢复机制**
+   - 自动移除死亡节点
+   - 重新加入数据丢失的成员
+   - 学习者自动晋升
+
+### etcdnode（Kubernetes 控制器）
+
+Kubernetes 原生控制器，负责节点网络信息同步和资源协调，为 etcd 集群提供动态网络配置支持。
+
+#### 核心功能
+
+1. **节点网络信息管理**
+   - 监听 `ECSNode` 自定义资源，获取节点的多网卡 IP 信息
+   - 根据配置的网络接口（`interfaces`）过滤和收集节点 IP
+   - 识别主接口（`masterif`）作为节点的主 IP
+   - 维护节点主 IP 到所有 IP 的映射关系
+
+2. **Pod 状态跟踪**
+   - 监听指定命名空间和标签的 Pod 资源
+   - 跟踪 Pod 的就绪状态（Ready）和宿主机 IP
+   - 订阅 EcsNode 更新，维护 Pod 宿主机到节点 IP 的映射
+   - 通过 PubSub 发布 Pod 状态变化事件
+
+3. **资源同步控制器**（可选）
+   - **Service 同步**：根据 Pod 状态更新 Service 的 Endpoints
+   - **ConfigMap 同步**：响应 Pod 状态变化同步 ConfigMap
+   - **Secret 同步**：自动生成和分发 TLS 证书到多个命名空间
+
+4. **事件驱动架构**
+   - 使用 PubSub 模式实现控制器间解耦通信
+   - EcsNode 控制器发布节点 IP 映射到 `EcsNodeTopic`
+   - Pod 控制器订阅 `EcsNodeTopic`，发布 Pod 状态到 `PodTopic`
+   - Service/ConfigMap/Secret 控制器订阅 `PodTopic` 进行同步
+
+#### 配置结构
+
+```yaml
+# EcsNode 配置
+ecsnode:
+  interfaces: ["eth0", "eth1"]  # 要跟踪的网络接口列表
+  masterif: "eth0"               # 主接口，用于确定节点主 IP
+  namespace: "default"           # ECSNode 资源所在命名空间
+
+# Pod 配置
+pod:
+  labels:                        # Pod 标签选择器
+    app: etcd
+  namespace: "default"           # 监听的 Pod 命名空间
+
+# Service 同步配置（可选）
+service:
+  name: "etcd-service"           # 要同步的 Service 名称
+  namespace: "default"
+
+# ConfigMap 同步配置（可选）
+configmap:
+  name: "etcd-config"            # 要同步的 ConfigMap 名称
+  namespace: "default"
+
+# 证书管理配置（可选）
+cert:
+  enabled: true                  # 是否启用证书管理
+  ca_secret_name: "etcd-ca"      # CA 证书 Secret 名称
+  ca_secret_namespace: "default" # CA Secret 所在命名空间
+  client_secret_namespaces:      # 客户端证书分发的命名空间列表
+    - "default"
+    - "kube-system"
+```
+
+#### 工作流程
+
+```mermaid
+graph LR
+    A[ECSNode CR] --> B[EcsNode Controller]
+    B --> C[节点IP映射]
+    C --> D[PubSub: EcsNodeTopic]
+
+    E[Pod Resources] --> F[Pod Controller]
+    D --> F
+    F --> G[Pod状态+宿主机IP]
+    G --> H[PubSub: PodTopic]
+
+    H --> I[Service Controller]
+    H --> J[ConfigMap Controller]
+    H --> K[Secret Controller]
+
+    I --> L[更新Service Endpoints]
+    J --> M[同步ConfigMap]
+    K --> N[分发TLS证书]
+```
+
+#### 部署要求
+
+1. **环境变量**
+   - `NAMESPACE`：控制器运行的命名空间（必需）
+
+2. **RBAC 权限**
+   - 读取 ECSNode 自定义资源
+   - 读写 Pod、Service、ConfigMap、Secret 资源
+   - Leader Election 权限
+
+3. **自定义资源定义**
+   - 需要预先创建 `ECSNode` CRD
+   - CRD 定义在 `pkg/apis/v1/types_ecsnode.go`
+
+#### 与 etcdcluster 的集成
+
+etcdnode 控制器为 etcdcluster sidecar 提供关键的网络信息：
+
+1. **节点 IP 文件生成**：将节点 IP 映射写入 `NODEIP_DIR` 目录
+2. **多网卡支持**：etcd 可以绑定到节点的多个 IP 地址
+3. **动态发现**：etcdcluster 读取这些文件获取集群成员的实际 IP 地址
+4. **证书分发**：自动生成和更新 etcd 所需的 TLS 证书
+
+## etcdcluster 环境变量要求
 
 ### 必需环境变量
 | 变量名 | 说明 |

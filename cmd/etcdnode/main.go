@@ -11,7 +11,6 @@ import (
 
 	apisv1 "github.com/yylt/etcdauto/pkg/apis/v1"
 	"github.com/yylt/etcdauto/pkg/controller"
-	"github.com/yylt/etcdauto/pkg/util"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -87,7 +86,7 @@ func main() {
 	mgr, err := ctrl.NewManager(restconfig, ctrl.Options{
 		Scheme:                  scheme,
 		LeaderElection:          true,
-		LeaderElectionID:        "89x1.ecsnode.leader",
+		LeaderElectionID:        "84x1.ecsnode.leader",
 		LeaderElectionNamespace: defaultns,
 		Metrics:                 metricserver.Options{BindAddress: "0"},
 		HealthProbeBindAddress:  "0",
@@ -95,7 +94,7 @@ func main() {
 	if err != nil {
 		klog.Fatalf("initialize manager failed: %v", err)
 	}
-	if err := setupControllers(mgr, cfg, restconfig); err != nil {
+	if err := setupControllers(mgr, cfg, restconfig, defaultns); err != nil {
 		klog.Fatalf("setup controllers failed: %v", err)
 	}
 
@@ -111,28 +110,33 @@ func main() {
 }
 
 // setupControllers initializes and adds all controllers to the manager
-func setupControllers(mgr ctrl.Manager, cfg *Config, restconfig *rest.Config) error {
-	pubsub := util.NewPubSub()
-	ecsctl := controller.NewEcsNode(&cfg.EcsNode, pubsub, mgr)
-	poctl := controller.NewPod(&cfg.PodConfig, pubsub, mgr)
-
-	if err := mgr.Add(ecsctl); err != nil {
-		return fmt.Errorf("add ecsnode controller failed: %w", err)
-	}
-	if err := mgr.Add(poctl); err != nil {
-		return fmt.Errorf("add pod controller failed: %w", err)
-	}
-
-	if cfg.ServiceConfig.Name != "" {
-		svcctl := controller.NewServiceSync(&cfg.ServiceConfig, poctl.ListPodHostIP, pubsub, mgr)
-		if err := mgr.Add(svcctl); err != nil {
-			return fmt.Errorf("add service controller failed: %w", err)
+func setupControllers(mgr ctrl.Manager, cfg *Config, restconfig *rest.Config, defaultns string) error {
+	// Add node controller if interfaces are configured
+	if len(cfg.NodeConfig.Interfaces) > 0 {
+		nodectl, err := controller.NewNode(&cfg.NodeConfig, mgr)
+		if err != nil {
+			return fmt.Errorf("create node controller failed: %w", err)
+		}
+		if err := mgr.Add(nodectl); err != nil {
+			return fmt.Errorf("add node controller failed: %w", err)
 		}
 	}
-	if cfg.Configmap.Name != "" {
-		cmctl := controller.NewConfigMapSync(&cfg.Configmap, pubsub, mgr)
-		if err := mgr.Add(cmctl); err != nil {
-			return fmt.Errorf("add configmap controller failed: %w", err)
+
+	// Add node sync controller if configmap is configured
+	if cfg.NodeSync.ConfigMapName != "" {
+		nodesyncctl, err := controller.NewNodeSync(&cfg.NodeSync, defaultns, mgr)
+		if err != nil {
+			return fmt.Errorf("create node sync controller failed: %w", err)
+		}
+		if err := mgr.Add(nodesyncctl); err != nil {
+			return fmt.Errorf("add node sync controller failed: %w", err)
+		}
+	}
+
+	if len(cfg.ServiceConfig.Ports) > 0 && len(cfg.ServiceConfig.PodLabels) > 0 {
+		svcctl := controller.NewServiceSync(&cfg.ServiceConfig, mgr)
+		if err := mgr.Add(svcctl); err != nil {
+			return fmt.Errorf("add service controller failed: %w", err)
 		}
 	}
 	if cfg.Cert.Enabled {

@@ -20,53 +20,41 @@ spec:
       - name: etcd
         image: your-registry/etcdcluster:latest
         command:
-        - /usr/local/bin/etcdcluster
-
+        - etcdcluster
+        resources:
+          requests:
+            cpu: 500m
+            memory: 512Mi
         env:
-        # Required environment variables
-        - name: POD_NAME
+        - name: POD_IP
           valueFrom:
             fieldRef:
-              fieldPath: metadata.name
-        - name: POD_NAMESPACE
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.namespace
-        - name: POD_IPS
-          valueFrom:
-            fieldRef:
-              fieldPath: status.podIPs
+              apiVersion: v1
+              fieldPath: status.podIP
         - name: SERVICE_NAME
-          value: "etcd"
-        - name: MAX
-          value: "3"
-        - name: NODEIP_DIR
-          value: "/run/nodeip"
-        - name: INTERFACES
-          value: "eth0,eth1"
+          value: etcd-server
+        - name: CLI_NAME
+          value: etcd
         - name: CLIENT_PORT
           value: "2479"
         - name: PEER_PORT
           value: "2480"
-        - name: ETCD_DATA_DIR
-          value: "/var/lib/etcd"
-        - name: CERT_DIR
-          value: "/run/etcd/ssl"
-        - name: CA_FILE
-          value: "/run/ssl/ca.pem"
-        - name: CA_KEY_FILE
-          value: "/run/ssl/ca-key.pem"
-        - name: LABELS
-          value: "component=etcd"
-
-        # Health check script locations (optional)
-        - name: READYZ_SCRIPT
-          value: "/run/etcd/readyz.sh"
-        - name: LIVEZ_SCRIPT
-          value: "/run/etcd/livez.sh"
-        - name: TIMEOUT
+        - name: NODEIP_DIR
+          value: /run/nodeip
+        - name: MAX
           value: "5"
-
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.name
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.namespace
+        - name: INTERFACES
+          value: br-roller,br-mgmt,br-storagepub
         ports:
         - name: client
           containerPort: 2479
@@ -74,7 +62,6 @@ spec:
         - name: peer
           containerPort: 2480
           protocol: TCP
-
         # Liveness probe - checks if etcd process is alive
         livenessProbe:
           exec:
@@ -82,62 +69,42 @@ spec:
             - /bin/sh
             - /run/etcd/livez.sh
           initialDelaySeconds: 10
-          periodSeconds: 10
+          periodSeconds: 4
           timeoutSeconds: 5
           failureThreshold: 3
-
-        # Readiness probe - checks if etcd is ready to serve
         readinessProbe:
           exec:
             command:
             - /bin/sh
             - /run/etcd/readyz.sh
           initialDelaySeconds: 5
-          periodSeconds: 5
+          periodSeconds: 4
           timeoutSeconds: 5
           failureThreshold: 3
-
         volumeMounts:
-        - name: etcd-data
-          mountPath: /var/lib/etcd
-        - name: etcd-runtime
-          mountPath: /run/etcd
-        - name: etcd-certs
-          mountPath: /run/ssl
-          readOnly: true
-        - name: nodeip
-          mountPath: /run/nodeip
-          readOnly: true
-
-        resources:
-          requests:
-            cpu: 500m
-            memory: 512Mi
-          limits:
-            cpu: 2000m
-            memory: 2Gi
-
+        - mountPath: /run/etcd
+          name: data
+        - mountPath: /run/nodeip
+          name: nodeips
+        - mountPath: /run/ssl
+          name: ssl
       volumes:
-      - name: etcd-runtime
-        emptyDir: {}
-      - name: etcd-certs
+      - emptyDir:
+          medium: Memory
+        name: data
+      - configMap:
+          defaultMode: 420
+          name: nodeips
+        name: nodeips
+      - name: ssl
         secret:
-          secretName: etcd-ca
-          defaultMode: 0644
-      - name: nodeip
-        hostPath:
-          path: /var/lib/etcd-nodeip
-          type: DirectoryOrCreate
-
-  volumeClaimTemplates:
-  - metadata:
-      name: etcd-data
-    spec:
-      accessModes: ["ReadWriteOnce"]
-      storageClassName: standard
-      resources:
-        requests:
-          storage: 10Gi
+          defaultMode: 420
+          items:
+          - key: ca.pem
+            path: ca.pem
+          - key: ca-key.pem
+            path: ca-key.pem
+          secretName: etcd-ssl
 
 ---
 apiVersion: v1

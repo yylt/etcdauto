@@ -10,11 +10,10 @@ import (
 )
 
 type Config struct {
-	Cert          controller.CertConfig      `json:"cert" yaml:"cert"`
-	Configmap     controller.ConfigMapConfig `json:"configmap" yaml:"configmap"`
-	PodConfig     controller.PodConfig       `json:"pod" yaml:"pod"`
-	EcsNode       controller.EcsNodeConfig   `json:"ecsnode" yaml:"ecsnode"`
-	ServiceConfig controller.ServiceConfig   `json:"service" yaml:"service"`
+	Cert          controller.CertConfig     `json:"cert" yaml:"cert"`
+	ServiceConfig controller.ServiceConfig  `json:"service" yaml:"service"`
+	NodeConfig    controller.NodeConfig     `json:"node" yaml:"node"`
+	NodeSync      controller.NodeSyncConfig `json:"nodesync" yaml:"nodesync"`
 }
 
 // LoadConfigmap reads data from file-path
@@ -62,14 +61,6 @@ func ApplyDefault(newcfg *Config, defaultns string) error {
 		}
 	}
 
-	if newcfg.Configmap.Name != "" {
-		if newcfg.Configmap.Namespace == "" {
-			newcfg.Configmap.Namespace = defaultns
-		}
-		if newcfg.Configmap.Valid() != nil {
-			return fmt.Errorf("configmap is invalid: %v", newcfg.Configmap)
-		}
-	}
 	if newcfg.ServiceConfig.Name != "" {
 		if newcfg.ServiceConfig.Namespace == "" {
 			newcfg.ServiceConfig.Namespace = defaultns
@@ -78,17 +69,11 @@ func ApplyDefault(newcfg *Config, defaultns string) error {
 			return fmt.Errorf("service is invalid: %v", newcfg.ServiceConfig)
 		}
 	}
-	if newcfg.PodConfig.Namespace == "" {
-		newcfg.PodConfig.Namespace = defaultns
-	}
-	if newcfg.EcsNode.Namespace == "" {
-		newcfg.EcsNode.Namespace = defaultns
-	}
 	switch {
-	case newcfg.EcsNode.Valid() != nil:
-		return fmt.Errorf("invalid ecnsnode config: %v, failed: %w", newcfg.EcsNode, newcfg.EcsNode.Valid())
-	case newcfg.PodConfig.Valid() != nil:
-		return fmt.Errorf("invalid pod config: %v, failed: %w", newcfg.PodConfig, newcfg.PodConfig.Valid())
+	case len(newcfg.NodeConfig.Interfaces) > 0 && newcfg.NodeConfig.Valid() != nil:
+		return fmt.Errorf("invalid node config: %v, failed: %w", newcfg.NodeConfig, newcfg.NodeConfig.Valid())
+	case newcfg.NodeSync.ConfigMapName != "" && newcfg.NodeSync.Valid() != nil:
+		return fmt.Errorf("invalid nodesync config: %v, failed: %w", newcfg.NodeSync, newcfg.NodeSync.Valid())
 	}
 	return nil
 }

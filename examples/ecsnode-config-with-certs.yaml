@@ -1,45 +1,37 @@
-# ECSNode Configuration Example with Certificate Management
+# Configuration Example
+
+node:
+  interfaces: ["br-roller","br-mgmt","br-storagepub"]  # Network interfaces to extract IPv4 addresses from
+
+### Below controllers requires leader election
+# NodeSync configuration - syncs node IP mappings to ConfigMap
+# ConfigMap namespace will be the same as the pod's namespace
+nodesync:
+  labels:                        # Filter nodes by labels (OR logic - any match)
+    kubernetes.io/os: linux
+  master_interface: "br-roller"       # Master interface to use as ConfigMap key
+  configmap_name: "nodeips"     # ConfigMap name to create/update
+
+# ServiceSync configuration - syncs node ip to service IPs
+service:
+  name: "etcd"
+  pod_labels:                    # Pod labels to watch for changes
+    component: etcd
+  ports:
+    - port: 2479
+      targetPort: 2479
+      protocol: tcp
+  publish_notready: false  
+
 
 # Certificate management configuration
 cert:
   enabled: true                          # Enable automatic certificate generation
-  caSecretName: "etcd-ca"               # CA certificate secret name
-  caSecretNamespace: "default"          # CA secret namespace (optional, defaults to NAMESPACE env)
-  memberSecretName: "etcd-member-cert"  # Member certificate secret name
-  memberSecretNamespaces:               # List of namespaces to create member secrets
+  caSecretName: "etcd-ssl"               # CA certificate secret name
+  clientSecretName: "etcd-client-cert"  # client certificate secret name
+  clientSecretNamespaces:               # List of namespaces to create client secrets
     - "default"
-    - "etcd-system"
-    - "production"
+    - "pro"
   validityYears: 100                    # Certificate validity in years
   organization: "etcdauto"              # Organization name for certificates
   commonName: "etcdauto-ca"             # CA common name
-
-# ECSNode configuration
-ecsnode:
-  namespace: default
-  interfaces:
-    - "eth0"
-    - "eth1"
-  masterif: "eth0"
-
-# Pod configuration
-pod:
-  namespace: default
-  labels:
-    app: etcd
-    component: etcd-server
-
-# Optional: Service configuration
-service:
-  name: "etcd-service"
-  namespace: "default"
-
-# Optional: ConfigMap configuration
-configmap:
-  name: "etcd-config"
-  namespace: "default"
-
-# Optional: Secret configuration
-secret:
-  name: "etcd-secret"
-  namespace: "default"

@@ -10,7 +10,7 @@ SHELL=/bin/bash -e -o pipefail
 PWD = $(shell pwd)
 ROOT_DIR = $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
 
-BIN_SUBDIRS := cmd/ecsnode cmd/etcdcluster
+BIN_SUBDIRS := cmd/etcdnode cmd/etcdcluster
 # Build configuration
 GCFLAGS ?=
 LDFLAGS ?= -w -s

@@ -24,7 +24,7 @@ FROM debian:12-slim
 ARG TARGETPLATFORM
 
 COPY --from=builder /bin/${TARGETPLATFORM}/etcdcluster /usr/bin/
-COPY --from=builder /bin/${TARGETPLATFORM}/ecsnode /usr/bin/
+COPY --from=builder /bin/${TARGETPLATFORM}/etcdnode /usr/bin/
 
 COPY --from=ETCD /usr/local/bin/etcd /usr/bin/
 COPY --from=ETCD /usr/local/bin/etcdctl /usr/bin/

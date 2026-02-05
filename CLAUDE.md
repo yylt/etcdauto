@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Etcd Auto Cluster is a Kubernetes-native solution for automatic etcd cluster setup and management. The project consists of two main components:
 
 1. **etcdcluster** (`cmd/etcdcluster/main.go`): A sidecar container that manages etcd cluster lifecycle - handles cluster initialization, member discovery, joining existing clusters, and automatic recovery
-2. **ecsnode** (`cmd/ecsnode/main.go`): A Kubernetes controller that synchronizes node network information and pod states to enable dynamic etcd cluster configuration
+2. **etcdnode** (`cmd/etcdnode/main.go`): A Kubernetes controller that synchronizes node network information and pod states to enable dynamic etcd cluster configuration
 
 ## Development Commands
 
@@ -98,7 +98,7 @@ The `cmd/etcdcluster/main.go` binary is designed to run as a sidecar container i
 
 ### Configuration
 
-The ecsnode controller uses YAML configuration (`cmd/ecsnode/config.go`):
+The ecsnode controller uses YAML configuration (`cmd/etcdnode/config.go`):
 
 ```yaml
 ecsnode:

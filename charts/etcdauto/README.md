@@ -34,17 +34,17 @@ The following table lists the configurable parameters of the etcdauto chart and 
 |-----------|-------------|---------|
 | `global.namespace` | Namespace to deploy resources | `openstack` |
 
-### ECSNode Parameters
+### etcdnode Parameters
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `ecsnode.enabled` | Enable ECSNode controller | `true` |
-| `ecsnode.replicaCount` | Number of ECSNode replicas | `1` |
-| `ecsnode.image.repository` | ECSNode image repository | `hub.easystack.cn/multiarch/etcdcluster` |
-| `ecsnode.image.tag` | ECSNode image tag | `v0.0.1` |
-| `ecsnode.image.pullPolicy` | Image pull policy | `IfNotPresent` |
-| `ecsnode.resources.requests.cpu` | CPU request | `100m` |
-| `ecsnode.resources.requests.memory` | Memory request | `128Mi` |
+| `etcdnode.enabled` | Enable etcdnode controller | `true` |
+| `etcdnode.replicaCount` | Number of etcdnode replicas | `1` |
+| `etcdnode.image.repository` | etcdnode image repository | `hub.easystack.cn/multiarch/etcdcluster` |
+| `etcdnode.image.tag` | etcdnode image tag | `v0.0.1` |
+| `etcdnode.image.pullPolicy` | Image pull policy | `IfNotPresent` |
+| `etcdnode.resources.requests.cpu` | CPU request | `100m` |
+| `etcdnode.resources.requests.memory` | Memory request | `128Mi` |
 
 ### etcd Parameters
 

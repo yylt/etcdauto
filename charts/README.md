@@ -17,9 +17,9 @@ charts/etcdauto/
 └── templates/
     ├── NOTES.txt                   # Post-installation notes
     ├── _helpers.tpl                # Template helpers
-    ├── ecsnode-configmap.yaml      # ECSNode configuration
-    ├── ecsnode-deployment.yaml     # ECSNode controller deployment
-    ├── ecsnode-rbac.yaml           # ECSNode RBAC resources
+    ├── etcdnode-configmap.yaml      # etcdnode configuration
+    ├── etcdnode-deployment.yaml     # etcdnode controller deployment
+    ├── etcdnode-rbac.yaml           # etcdnode RBAC resources
     ├── etcd-rbac.yaml              # etcd RBAC resources
     ├── etcd-service.yaml           # etcd services
     ├── etcd-statefulset.yaml       # etcd StatefulSet

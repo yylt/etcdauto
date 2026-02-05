@@ -6,8 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yylt/etcdauto/pkg/util"
-
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -33,10 +31,11 @@ type portInfo struct {
 }
 
 type ServiceConfig struct {
-	PublishNotReady bool       `json:"publish_notready,omitempty" yaml:"publish_notready,omitempty"`
-	Namespace       string     `json:"namespace,omitempty" yaml:"namespace,omitempty"`
-	Name            string     `json:"name" yaml:"name"`
-	Ports           []portInfo `json:"ports" yaml:"ports"`
+	PublishNotReady bool              `json:"publish_notready,omitempty" yaml:"publish_notready,omitempty"`
+	Namespace       string            `json:"namespace,omitempty" yaml:"namespace,omitempty"`
+	Name            string            `json:"name" yaml:"name"`
+	Ports           []portInfo        `json:"ports" yaml:"ports"`
+	PodLabels       map[string]string `json:"pod_labels,omitempty" yaml:"pod_labels,omitempty"`
 }
 
 func (c *ServiceConfig) Valid() error {
@@ -45,6 +44,9 @@ func (c *ServiceConfig) Valid() error {
 	}
 	if len(c.Ports) == 0 {
 		return fmt.Errorf("ports must not be empty")
+	}
+	if len(c.PodLabels) == 0 {
+		return fmt.Errorf("pod_labels must not be empty")
 	}
 	return nil
 }
@@ -119,50 +121,79 @@ func (si *svcInfo) String() string {
 	return fmt.Sprintf("service: %s(ports: %s, address: %s)", ctrclient.ObjectKeyFromObject(si.service), ps, as)
 }
 
+type podAddress struct {
+	PodName  string
+	NodeName string
+	IPs      []string
+}
+
 type ServiceSync struct {
 	config *ServiceConfig
 
 	svcinfo *svcInfo
 
-	posub *util.Subscriber
-
 	client ctrclient.Client
 
-	iplistfn  ListIPListFn
 	triggerch chan struct{}
 }
 
-func NewServiceSync(config *ServiceConfig, listfn ListIPListFn, ps *util.PubSub, mgr manager.Manager) *ServiceSync {
-	posub, err := ps.Subscribe(PodTopic, "service")
-	if err != nil {
-		klog.Fatal(err)
-	}
-
+func NewServiceSync(config *ServiceConfig, mgr manager.Manager) *ServiceSync {
 	ss := &ServiceSync{
-		iplistfn:  listfn,
 		config:    config,
-		posub:     posub,
 		client:    mgr.GetClient(),
 		triggerch: make(chan struct{}, 10),
 	}
-	ss.svcinfo = ss.serviceEndpoint()
+	ss.svcinfo = ss.serviceEndpointWithAddresses(nil)
 
-	err = ctrl.NewControllerManagedBy(mgr).
+	builder := ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Service{}).
 		WithEventFilter(predicate.NewPredicateFuncs(func(object ctrclient.Object) bool {
+			if _, ok := object.(*corev1.Pod); ok {
+				return true
+			}
 			if object.GetName() == config.Name && object.GetNamespace() == config.Namespace {
 				return true
 			}
 			return false
-		})).
-		Watches(&corev1.Endpoints{},
-			handler.EnqueueRequestsFromMapFunc(func(_ context.Context, object ctrclient.Object) []reconcile.Request {
-				if object.GetName() == config.Name && object.GetNamespace() == config.Namespace {
+		}))
+
+	// Watch Endpoints
+	builder = builder.Watches(&corev1.Endpoints{},
+		handler.EnqueueRequestsFromMapFunc(func(_ context.Context, object ctrclient.Object) []reconcile.Request {
+			if object.GetName() == config.Name && object.GetNamespace() == config.Namespace {
+				return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: config.Name, Namespace: config.Namespace}}}
+			}
+			return nil
+		}))
+
+	// Watch Pods with matching labels
+	builder = builder.Watches(&corev1.Pod{},
+		handler.EnqueueRequestsFromMapFunc(func(_ context.Context, object ctrclient.Object) []reconcile.Request {
+			pod, ok := object.(*corev1.Pod)
+			if !ok {
+				return nil
+			}
+			// Check if pod is in the same namespace
+			if pod.Namespace != config.Namespace {
+				return nil
+			}
+			// Check if pod labels match
+			podLabels := pod.GetLabels()
+			if podLabels == nil {
+				return nil
+			}
+			for k, v := range config.PodLabels {
+				if podLabels[k] != v {
 					return nil
 				}
-				return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: config.Name, Namespace: config.Namespace}}}
-			})).
-		Complete(ss)
+			}
+			// Trigger service reconciliation
+			return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: config.Name, Namespace: config.Namespace}}}
+		}),
+	)
+	// Not require to watch node, becaut node ip will set in node annotations,
+	// And Pod create depends on cert, which must slower than node ip set.
+	err := builder.Complete(ss)
 	if err != nil {
 		klog.Fatalf("create service controller failed: %v", err)
 	}
@@ -179,13 +210,6 @@ func (s *ServiceSync) Start(ctx context.Context) error {
 				close(s.triggerch)
 				klog.Infof("controller had stop: %v", ctx.Err())
 				return
-			case _, ok := <-s.posub.GetMessage():
-				if !ok {
-					klog.Errorf("pod subscribe had close")
-					return
-				}
-				klog.Info("pod had changed, will trigger service sync")
-				s.triggerch <- struct{}{}
 			case _, ok := <-s.triggerch:
 				if !ok {
 					klog.Errorf("service trigger had close")
@@ -244,14 +268,14 @@ func (s *ServiceSync) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Res
 
 // syncService creates or updates a headless Service
 func (s *ServiceSync) syncService(ctx context.Context) error {
-	all, err := s.iplistfn(ctx, s.config.PublishNotReady)
+	addresses, err := s.listPodAddresses(ctx)
 	if err != nil {
-		klog.Errorf("list address failed: %v", err)
+		klog.Errorf("list pod addresses failed: %v", err)
 		return err
 	}
 
 	var (
-		desiredInfo = s.serviceEndpoint(all...)
+		desiredInfo = s.serviceEndpointWithAddresses(addresses)
 		desiredCopy = desiredInfo.deepCopy()
 	)
 
@@ -296,7 +320,70 @@ func (s *ServiceSync) syncService(ctx context.Context) error {
 	return nil
 }
 
-func (s *ServiceSync) serviceEndpoint(addresses ...string) *svcInfo {
+// listPodAddresses lists all pods matching pod_labels and gets their addresses from node annotations
+func (s *ServiceSync) listPodAddresses(ctx context.Context) ([]podAddress, error) {
+	var podList corev1.PodList
+
+	// List pods in the namespace matching pod_labels
+	listOpts := []ctrclient.ListOption{
+		ctrclient.InNamespace(s.config.Namespace),
+		ctrclient.MatchingLabels(s.config.PodLabels),
+	}
+
+	if err := s.client.List(ctx, &podList, listOpts...); err != nil {
+		return nil, fmt.Errorf("failed to list pods: %w", err)
+	}
+
+	var addresses []podAddress
+	for _, pod := range podList.Items {
+		// Skip pods that are not ready unless PublishNotReady is true
+		if !s.config.PublishNotReady && !isPodReady(&pod) {
+			continue
+		}
+
+		// Get the node this pod is running on
+		if pod.Spec.NodeName == "" {
+			continue
+		}
+
+		// Get node to read annotations
+		var node corev1.Node
+		if err := s.client.Get(ctx, types.NamespacedName{Name: pod.Spec.NodeName}, &node); err != nil {
+			klog.Warningf("failed to get node %s for pod %s: %v", pod.Spec.NodeName, pod.Name, err)
+			continue
+		}
+
+		// Extract IPs from node annotations
+		var ips []string
+		for key, value := range node.Annotations {
+			if strings.HasPrefix(key, NodeAnnotationPrefix) {
+				ips = append(ips, value)
+			}
+		}
+
+		if len(ips) > 0 {
+			addresses = append(addresses, podAddress{
+				PodName:  pod.Name,
+				NodeName: pod.Spec.NodeName,
+				IPs:      ips,
+			})
+		}
+	}
+
+	return addresses, nil
+}
+
+// isPodReady checks if a pod is ready
+func isPodReady(pod *corev1.Pod) bool {
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *ServiceSync) serviceEndpointWithAddresses(addresses []podAddress) *svcInfo {
 	meta := v1.ObjectMeta{
 		Annotations: map[string]string{ServiceAnnoNotReadyKey: fmt.Sprintf("%t", s.config.PublishNotReady)},
 		Name:        s.config.Name,
@@ -311,14 +398,29 @@ func (s *ServiceSync) serviceEndpoint(addresses ...string) *svcInfo {
 			Ports:     transPorts(s.config.Ports),
 		},
 	}
-	var addrs []corev1.EndpointAddress = make([]corev1.EndpointAddress, len(addresses))
-	for i := range addresses {
-		addrs[i] = corev1.EndpointAddress{IP: addresses[i]}
+
+	// Build endpoint addresses from pod addresses
+	var addrs []corev1.EndpointAddress
+	for _, podAddr := range addresses {
+		// Create an endpoint address for each IP from node annotations
+		for _, ip := range podAddr.IPs {
+			addr := corev1.EndpointAddress{
+				IP:       ip,
+				NodeName: &podAddr.NodeName,
+				TargetRef: &corev1.ObjectReference{
+					Kind:      "Pod",
+					Namespace: s.config.Namespace,
+					Name:      podAddr.PodName,
+				},
+			}
+			addrs = append(addrs, addr)
+		}
 	}
+
 	endpoints := &corev1.Endpoints{
 		ObjectMeta: meta,
 	}
-	if len(addresses) != 0 {
+	if len(addrs) > 0 {
 		endpoints.Subsets = []corev1.EndpointSubset{{Addresses: addrs}}
 	}
 	return &svcInfo{service: service, endpoint: endpoints}
