@@ -24,8 +24,7 @@ type CertConfig struct {
 	Namespace   string
 	ServiceName string
 	CliName     string
-	PodIP       string
-	ExtraIPs    []string
+	IPs         []string // All IP addresses for this pod (host network)
 	CertDir     string
 	CAFile      string
 	CAKeyFile   string
@@ -35,6 +34,10 @@ type CertConfig struct {
 func GenerateCertificate(cfg *CertConfig) error {
 	certFile := filepath.Join(cfg.CertDir, fmt.Sprintf("%s.pem", cfg.PodName))
 	keyFile := filepath.Join(cfg.CertDir, fmt.Sprintf("%s-key.pem", cfg.PodName))
+
+	klog.Infof("Starting certificate generation for pod: %s", cfg.PodName)
+	klog.V(2).Infof("Certificate file path: %s", certFile)
+	klog.V(2).Infof("Key file path: %s", keyFile)
 
 	// Check if certificate already exists
 	if fileExists(certFile) && fileExists(keyFile) {
@@ -46,37 +49,50 @@ func GenerateCertificate(cfg *CertConfig) error {
 	if err := os.MkdirAll(cfg.CertDir, 0755); err != nil {
 		return fmt.Errorf("failed to create cert directory: %w", err)
 	}
+	klog.V(2).Infof("Certificate directory created/verified: %s", cfg.CertDir)
 
 	// Load CA certificate and key
+	klog.V(2).Infof("Loading CA certificate from: %s", cfg.CAFile)
 	caCert, caKey, err := loadCA(cfg.CAFile, cfg.CAKeyFile)
 	if err != nil {
 		return fmt.Errorf("failed to load CA: %w", err)
 	}
+	klog.V(2).Infof("CA certificate loaded successfully, subject: %s", caCert.Subject.String())
 
 	// Generate private key
+	klog.V(2).Info("Generating ECDSA P256 private key")
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return fmt.Errorf("failed to generate private key: %w", err)
 	}
+	klog.V(2).Info("Private key generated successfully")
 
 	// Create certificate template
 	template := createCertTemplate(cfg)
+	klog.Infof("Certificate template created with %d DNS names and IP addresses: %s",
+		len(template.DNSNames), template.IPAddresses)
+	klog.V(2).Infof("DNS names: %v", template.DNSNames)
 
 	// Sign certificate
+	klog.V(2).Info("Signing certificate with CA")
 	certDER, err := x509.CreateCertificate(rand.Reader, template, caCert, &privateKey.PublicKey, caKey)
 	if err != nil {
 		return fmt.Errorf("failed to create certificate: %w", err)
 	}
+	klog.V(2).Info("Certificate signed successfully")
 
 	// Write certificate and key files
+	klog.V(2).Infof("Writing certificate and key files")
 	if err := writeCertFiles(certFile, keyFile, certDER, privateKey); err != nil {
 		return err
 	}
+	klog.Infof("Certificate and key files written successfully")
 
 	// Copy CA certificate to cert directory
 	if err := copyCACert(cfg.CAFile, cfg.CertDir); err != nil {
 		return err
 	}
+	klog.V(2).Infof("CA certificate copied to cert directory")
 
 	klog.Infof("Successfully generated certificate: %s", certFile)
 	return nil
@@ -94,8 +110,9 @@ func createCertTemplate(cfg *CertConfig) *x509.Certificate {
 		"localhost",
 	}
 
-	ipAddresses := []string{"127.0.0.1", cfg.PodIP}
-	ipAddresses = append(ipAddresses, cfg.ExtraIPs...)
+	// Start with localhost, then add all host network IPs
+	ipAddresses := []string{"127.0.0.1"}
+	ipAddresses = append(ipAddresses, cfg.IPs...)
 
 	template := &x509.Certificate{
 		SerialNumber: generateSerialNumber(),
@@ -103,7 +120,7 @@ func createCertTemplate(cfg *CertConfig) *x509.Certificate {
 			CommonName: cfg.PodName,
 		},
 		NotBefore:             time.Now(),
-		NotAfter:              time.Now().Add(87600 * time.Hour), // 10 years
+		NotAfter:              time.Now().Add(876000 * time.Hour), // 100 years
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 		BasicConstraintsValid: true,

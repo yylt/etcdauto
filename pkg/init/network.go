@@ -10,10 +10,9 @@ import (
 
 // NetworkConfig holds network interface configuration
 type NetworkConfig struct {
-	Interfaces        []string // Network interfaces to extract IPs from (exact names or prefixes)
-	InterfacePrefixes []string // Network interface prefixes to match (e.g., "eth" matches eth0, eth1, etc.)
-	ClientPort        string   // Client port for etcd
-	PeerPort          string   // Peer port for etcd
+	Interfaces []string // Network interfaces to extract IPs from (exact names)
+	ClientPort string   // Client port for etcd
+	PeerPort   string   // Peer port for etcd
 }
 
 // NetworkInfo holds extracted network information
@@ -24,10 +23,9 @@ type NetworkInfo struct {
 }
 
 // ExtractNetworkInfo extracts IP addresses from network interfaces
-// Supports both exact interface names and prefix matching
 func ExtractNetworkInfo(cfg *NetworkConfig) (*NetworkInfo, error) {
-	if len(cfg.Interfaces) == 0 && len(cfg.InterfacePrefixes) == 0 {
-		return nil, fmt.Errorf("no interfaces or interface prefixes specified")
+	if len(cfg.Interfaces) == 0 {
+		return nil, fmt.Errorf("no interfaces specified")
 	}
 
 	info := &NetworkInfo{
@@ -36,20 +34,7 @@ func ExtractNetworkInfo(cfg *NetworkConfig) (*NetworkInfo, error) {
 		ClientURLs: make([]string, 0),
 	}
 
-	// Get all network interfaces
-	allInterfaces, err := net.Interfaces()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get network interfaces: %w", err)
-	}
-
-	// Build a set of interfaces to process
-	interfacesToProcess := buildInterfaceSet(cfg, allInterfaces)
-	if len(interfacesToProcess) == 0 {
-		return nil, fmt.Errorf("no matching interfaces found")
-	}
-
-	// Extract IPs from matched interfaces
-	extractIPsFromInterfaces(interfacesToProcess, cfg, info)
+	extractIPsFromInterfaces(cfg, info)
 
 	if len(info.IPs) == 0 {
 		return nil, fmt.Errorf("no IPv4 addresses found on matching interfaces")
@@ -58,31 +43,9 @@ func ExtractNetworkInfo(cfg *NetworkConfig) (*NetworkInfo, error) {
 	return info, nil
 }
 
-// buildInterfaceSet builds a set of interface names to process
-func buildInterfaceSet(cfg *NetworkConfig, allInterfaces []net.Interface) map[string]bool {
-	interfacesToProcess := make(map[string]bool)
-
-	// Add exact interface names
-	for _, ifaceName := range cfg.Interfaces {
-		interfacesToProcess[ifaceName] = true
-	}
-
-	// Add interfaces matching prefixes
-	for _, iface := range allInterfaces {
-		for _, prefix := range cfg.InterfacePrefixes {
-			if strings.HasPrefix(iface.Name, prefix) {
-				interfacesToProcess[iface.Name] = true
-				klog.Infof("Interface %s matches prefix %s", iface.Name, prefix)
-			}
-		}
-	}
-
-	return interfacesToProcess
-}
-
 // extractIPsFromInterfaces extracts IPs from the given interfaces
-func extractIPsFromInterfaces(interfacesToProcess map[string]bool, cfg *NetworkConfig, info *NetworkInfo) {
-	for ifaceName := range interfacesToProcess {
+func extractIPsFromInterfaces(cfg *NetworkConfig, info *NetworkInfo) {
+	for _, ifaceName := range cfg.Interfaces {
 		iface, err := net.InterfaceByName(ifaceName)
 		if err != nil {
 			klog.Warningf("Failed to get interface %s: %v", ifaceName, err)
@@ -95,25 +58,28 @@ func extractIPsFromInterfaces(interfacesToProcess map[string]bool, cfg *NetworkC
 			continue
 		}
 
-		if processInterfaceAddresses(addrs, ifaceName, cfg, info) {
-			break // Only take first IPv4 address per interface
-		}
+		processInterfaceAddresses(addrs, ifaceName, cfg, info)
 	}
 }
 
 // processInterfaceAddresses processes addresses for a single interface
-func processInterfaceAddresses(addrs []net.Addr, ifaceName string, cfg *NetworkConfig, info *NetworkInfo) bool {
+func processInterfaceAddresses(addrs []net.Addr, _ string, cfg *NetworkConfig, info *NetworkInfo) {
 	for _, addr := range addrs {
 		var ip net.IP
+		var ones, bits int
 		switch v := addr.(type) {
 		case *net.IPNet:
 			ip = v.IP
+			ones, bits = v.Mask.Size()
 		case *net.IPAddr:
 			ip = v.IP
 		}
 
 		// Only use IPv4 addresses
 		if ip == nil || ip.To4() == nil {
+			continue
+		}
+		if bits == 32 && ones == 32 {
 			continue
 		}
 
@@ -127,11 +93,7 @@ func processInterfaceAddresses(addrs []net.Addr, ifaceName string, cfg *NetworkC
 		if cfg.ClientPort != "" {
 			info.ClientURLs = append(info.ClientURLs, fmt.Sprintf("https://%s:%s", ipStr, cfg.ClientPort))
 		}
-
-		klog.Infof("Found IP %s on interface %s", ipStr, ifaceName)
-		return true // Only take first IPv4 address per interface
 	}
-	return false
 }
 
 // GetInterfaceIP gets the first IPv4 address from a specific interface
