@@ -10,16 +10,18 @@ import (
 
 // NetworkConfig holds network interface configuration
 type NetworkConfig struct {
-	Interfaces []string // Network interfaces to extract IPs from (exact names)
-	ClientPort string   // Client port for etcd
-	PeerPort   string   // Peer port for etcd
+	Interfaces     []string // Network interfaces to extract IPs from (exact names)
+	ClientPort     string   // Client port for etcd
+	ClientHTTPPort string   // Client HTTP port for etcd
+	PeerPort       string   // Peer port for etcd
 }
 
 // NetworkInfo holds extracted network information
 type NetworkInfo struct {
-	IPs        []string // All IP addresses from interfaces
-	PeerURLs   []string // Peer URLs (https://ip:peerPort)
-	ClientURLs []string // Client URLs (https://ip:clientPort)
+	IPs            []string // All IP addresses from interfaces
+	PeerURLs       []string // Peer URLs (https://ip:peerPort)
+	ClientURLs     []string // Client URLs (https://ip:clientPort)
+	ClientHTTPURLs []string // Client HTTP URLs (https://ip:ClientHTTPPort)
 }
 
 // ExtractNetworkInfo extracts IP addresses from network interfaces
@@ -29,9 +31,10 @@ func ExtractNetworkInfo(cfg *NetworkConfig) (*NetworkInfo, error) {
 	}
 
 	info := &NetworkInfo{
-		IPs:        make([]string, 0),
-		PeerURLs:   make([]string, 0),
-		ClientURLs: make([]string, 0),
+		IPs:            make([]string, 0),
+		PeerURLs:       make([]string, 0),
+		ClientURLs:     make([]string, 0),
+		ClientHTTPURLs: make([]string, 0),
 	}
 
 	extractIPsFromInterfaces(cfg, info)
@@ -60,6 +63,9 @@ func extractIPsFromInterfaces(cfg *NetworkConfig, info *NetworkInfo) {
 		}
 		if cfg.ClientPort != "" {
 			info.ClientURLs = append(info.ClientURLs, fmt.Sprintf("https://%s:%s", ipStr, cfg.ClientPort))
+		}
+		if cfg.ClientHTTPPort != "" {
+			info.ClientHTTPURLs = append(info.ClientHTTPURLs, fmt.Sprintf("https://%s:%s", ipStr, cfg.ClientHTTPPort))
 		}
 	}
 }

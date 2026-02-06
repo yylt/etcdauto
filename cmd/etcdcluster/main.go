@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/yylt/etcdauto/pkg/cluster"
 	etcdinit "github.com/yylt/etcdauto/pkg/init"
@@ -26,20 +25,21 @@ var (
 // Config holds all configuration for etcdcluster
 type Config struct {
 	// From environment
-	PodName      string
-	PodNamespace string
-	ServiceName  string
-	CliName      string
-	Max          int
-	ClientPort   string
-	PeerPort     string
-	DataDir      string
-	CertDir      string
-	NodeIPDir    string
-	CAFile       string
-	CAKeyFile    string
-	Interfaces   []string
-	Labels       string
+	PodName        string
+	PodNamespace   string
+	ServiceName    string
+	CliName        string
+	Max            int
+	ClientPort     string
+	ClientHTTPPort string
+	PeerPort       string
+	DataDir        string
+	CertDir        string
+	NodeIPDir      string
+	CAFile         string
+	CAKeyFile      string
+	Interfaces     []string
+	Labels         string
 
 	// Parsed
 	Prefix  string
@@ -89,6 +89,7 @@ func main() {
 		klog.Error("Optional environment variables (with defaults):")
 		klog.Error("  CLI_NAME         - Client service name (optional)")
 		klog.Error("  CLIENT_PORT      - Client port (default: 2479)")
+		klog.Error("  CLIENT_HTTP_PORT - Client HTTP port (default: 2481)")
 		klog.Error("  PEER_PORT        - Peer port (default: 2480)")
 		klog.Error("  ETCD_DATA_DIR    - Data directory (default: /run/etcd/data)")
 		klog.Error("  CERT_DIR         - Certificate directory (default: /run/etcd/ssl)")
@@ -121,18 +122,19 @@ func main() {
 // loadConfig loads configuration from environment variables
 func loadConfig() (*Config, error) {
 	cfg := &Config{
-		PodName:      os.Getenv("POD_NAME"),
-		PodNamespace: os.Getenv("NAMESPACE"),
-		ServiceName:  os.Getenv("SERVICE_NAME"),
-		CliName:      os.Getenv("CLI_NAME"),
-		ClientPort:   getEnvOrDefault("CLIENT_PORT", "2479"),
-		PeerPort:     getEnvOrDefault("PEER_PORT", "2480"),
-		DataDir:      getEnvOrDefault("ETCD_DATA_DIR", "/run/etcd/data"),
-		CertDir:      getEnvOrDefault("CERT_DIR", "/run/etcd/ssl"),
-		NodeIPDir:    os.Getenv("NODEIP_DIR"),
-		CAFile:       getEnvOrDefault("CA_FILE", "/run/ssl/ca.pem"),
-		CAKeyFile:    getEnvOrDefault("CA_KEY_FILE", "/run/ssl/ca-key.pem"),
-		Labels:       getEnvOrDefault("LABELS", "component=etcd"),
+		PodName:        os.Getenv("POD_NAME"),
+		PodNamespace:   os.Getenv("NAMESPACE"),
+		ServiceName:    os.Getenv("SERVICE_NAME"),
+		CliName:        os.Getenv("CLI_NAME"),
+		ClientPort:     getEnvOrDefault("CLIENT_PORT", "2479"),
+		ClientHTTPPort: getEnvOrDefault("CLIENT_HTTP_PORT", "2481"),
+		PeerPort:       getEnvOrDefault("PEER_PORT", "2480"),
+		DataDir:        getEnvOrDefault("ETCD_DATA_DIR", "/run/etcd/data"),
+		CertDir:        getEnvOrDefault("CERT_DIR", "/run/etcd/ssl"),
+		NodeIPDir:      os.Getenv("NODEIP_DIR"),
+		CAFile:         getEnvOrDefault("CA_FILE", "/run/ssl/ca.pem"),
+		CAKeyFile:      getEnvOrDefault("CA_KEY_FILE", "/run/ssl/ca-key.pem"),
+		Labels:         getEnvOrDefault("LABELS", "component=etcd"),
 	}
 
 	// Validate required environment variables
@@ -180,9 +182,10 @@ func loadConfig() (*Config, error) {
 
 	// Extract IPs from network interfaces
 	networkInfo, err := etcdinit.ExtractNetworkInfo(&etcdinit.NetworkConfig{
-		Interfaces: cfg.Interfaces,
-		ClientPort: cfg.ClientPort,
-		PeerPort:   cfg.PeerPort,
+		Interfaces:     cfg.Interfaces,
+		ClientPort:     cfg.ClientPort,
+		ClientHTTPPort: cfg.ClientHTTPPort,
+		PeerPort:       cfg.PeerPort,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to extract network info: %w", err)
@@ -271,9 +274,10 @@ func initializeEnvironment(cfg *Config) error {
 
 	// Extract network info for URLs
 	networkInfo, err := etcdinit.ExtractNetworkInfo(&etcdinit.NetworkConfig{
-		Interfaces: cfg.Interfaces,
-		ClientPort: cfg.ClientPort,
-		PeerPort:   cfg.PeerPort,
+		Interfaces:     cfg.Interfaces,
+		ClientPort:     cfg.ClientPort,
+		ClientHTTPPort: cfg.ClientHTTPPort,
+		PeerPort:       cfg.PeerPort,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to extract network info: %w", err)
@@ -281,20 +285,22 @@ func initializeEnvironment(cfg *Config) error {
 
 	// Setup environment variables
 	envCfg := &etcdinit.EnvConfig{
-		PodName:      cfg.PodName,
-		PodNamespace: cfg.PodNamespace,
-		PodIPs:       cfg.MyIPs,
-		ServiceName:  cfg.ServiceName,
-		CliName:      cfg.CliName,
-		Max:          cfg.Max,
-		ClientPort:   cfg.ClientPort,
-		PeerPort:     cfg.PeerPort,
-		ClientURLs:   networkInfo.ClientURLs,
-		PeerURLs:     networkInfo.PeerURLs,
-		DataDir:      cfg.DataDir,
-		CertDir:      cfg.CertDir,
-		NodeIPDir:    cfg.NodeIPDir,
-		Labels:       cfg.Labels,
+		PodName:        cfg.PodName,
+		PodNamespace:   cfg.PodNamespace,
+		PodIPs:         cfg.MyIPs,
+		ServiceName:    cfg.ServiceName,
+		CliName:        cfg.CliName,
+		Max:            cfg.Max,
+		ClientPort:     cfg.ClientPort,
+		ClientHTTPPort: cfg.ClientHTTPPort,
+		PeerPort:       cfg.PeerPort,
+		ClientURLs:     networkInfo.ClientURLs,
+		ClientHTTPURLs: networkInfo.ClientHTTPURLs,
+		PeerURLs:       networkInfo.PeerURLs,
+		DataDir:        cfg.DataDir,
+		CertDir:        cfg.CertDir,
+		NodeIPDir:      cfg.NodeIPDir,
+		Labels:         cfg.Labels,
 	}
 
 	if err := etcdinit.SetupEnvironment(envCfg); err != nil {
@@ -309,12 +315,12 @@ func initializeEnvironment(cfg *Config) error {
 
 	// Write health check scripts
 	readyzScriptPath := getEnvOrDefault("READYZ_SCRIPT", "/run/etcd/readyz.sh")
-	if err := etcdinit.WriteReadyzScript(cfg.PodName, cfg.CertDir, cfg.ClientPort, readyzScriptPath); err != nil {
+	if err := etcdinit.WriteReadyzScript("/run/etcd/env", readyzScriptPath); err != nil {
 		return fmt.Errorf("failed to write readyz script: %w", err)
 	}
 
 	livezScriptPath := getEnvOrDefault("LIVEZ_SCRIPT", "/run/etcd/livez.sh")
-	if err := etcdinit.WriteLivezScript(cfg.PodName, cfg.CertDir, cfg.ClientPort, livezScriptPath); err != nil {
+	if err := etcdinit.WriteLivezScript(cfg.PodName, cfg.CertDir, cfg.ClientHTTPPort, livezScriptPath); err != nil {
 		return fmt.Errorf("failed to write livez script: %w", err)
 	}
 
@@ -334,11 +340,10 @@ func runClusterLoop(cfg *Config) {
 	})
 
 	retryCount := 0
-	maxRetries := 10
-	baseDelay := 200 * time.Millisecond
 
 	for {
-		klog.Infof("=== Cluster management loop iteration %d ===", retryCount+1)
+		retryCount++
+		klog.Infof("=== Cluster management loop iteration %d ===", retryCount)
 
 		// Discover endpoints
 		discoveryCfg := &cluster.DiscoveryConfig{
@@ -357,18 +362,8 @@ func runClusterLoop(cfg *Config) {
 		endpointInfo, err := cluster.DiscoverEndpoints(discoveryCfg)
 		if err != nil {
 			klog.Errorf("Failed to discover endpoints: %v", err)
-			retryCount++
-			if retryCount >= maxRetries {
-				klog.Fatalf("Max retries (%d) reached for endpoint discovery, exiting", maxRetries)
-			}
-			delay := calculateBackoff(retryCount, baseDelay)
-			klog.Infof("Retrying in %v (attempt %d/%d)", delay, retryCount, maxRetries)
-			time.Sleep(delay)
 			continue
 		}
-
-		// Reset retry count on successful discovery
-		retryCount = 0
 
 		switch len(endpointInfo.AliveEndpoints) {
 		case 0:
@@ -377,7 +372,7 @@ func runClusterLoop(cfg *Config) {
 				klog.Warningf("No alive endpoints found for '%s', waiting for pod-0 to initialize cluster", cfg.PodName)
 				break
 			}
-
+			// TODO: pod-0 discovery endpoint wrong maybe make brain split!
 			// Initialize new cluster (only pod-0)
 			klog.Info("No alive endpoints and I'm pod-0, initializing new cluster")
 			cmd, err := clusterMgr.InitializeNewCluster(cfg.MyIPs, ETCDBIN)
@@ -404,17 +399,6 @@ func runClusterLoop(cfg *Config) {
 			}
 		}
 	}
-}
-
-// calculateBackoff calculates exponential backoff delay
-func calculateBackoff(retryCount int, baseDelay time.Duration) time.Duration {
-	// Exponential backoff: baseDelay * 2^retryCount, max 60 seconds
-	delay := baseDelay * time.Duration(1<<uint(retryCount))
-	maxDelay := 60 * time.Second
-	if delay > maxDelay {
-		delay = maxDelay
-	}
-	return delay
 }
 
 // parsePodName parses pod name to extract prefix and index

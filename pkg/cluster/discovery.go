@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -13,6 +14,9 @@ import (
 	"time"
 
 	"github.com/yylt/etcdauto/pkg/util"
+	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
+	etcdcli "go.etcd.io/etcd/client/v3"
+	"go.uber.org/zap"
 	"k8s.io/klog/v2"
 )
 
@@ -44,14 +48,11 @@ func DiscoverEndpoints(cfg *DiscoveryConfig) (*EndpointInfo, error) {
 		AliveEndpoints: make(map[string][]string),
 		DeadNames:      make(map[string]struct{}),
 	}
-
-	// Load client cert for health checks
-	klog.V(2).Infof("Loading TLS config from cert: %s, key: %s", cfg.CertFile, cfg.KeyFile)
+	// Load client cert
 	tlscfg, err := loadTLSConfig(cfg.CertFile, cfg.KeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load TLS config: %w", err)
 	}
-	klog.V(2).Info("TLS config loaded successfully")
 
 	// Read all IP files from nodeIPDir
 	entries, err := os.ReadDir(cfg.NodeIPDir)
@@ -129,17 +130,62 @@ func loadTLSConfig(certFile, keyFile string) (*tls.Config, error) {
 
 // checkEndpointHealth checks if any endpoint in the IP list is healthy
 func checkEndpointHealth(iplist []string, clientPort string, tlscfg *tls.Config) bool {
-	klog.V(2).Infof("Checking health for IPs: %v", iplist)
+	if len(iplist) == 0 {
+		klog.Warning("Empty IP list provided for health check")
+		return false
+	}
 
+	var (
+		ctx = context.Background()
+
+		wg     sync.WaitGroup
+		health = make(chan bool, len(iplist))
+	)
 	for _, ip := range iplist {
-		ipport := net.JoinHostPort(ip, clientPort)
-		if checkReadyz(ipport, tlscfg) {
-			klog.V(2).Infof("Endpoint %s is healthy", ipport)
+		wg.Add(1)
+		go func(ip string) {
+			defer wg.Done()
+			health <- checkSingleEndpoint(ctx, net.JoinHostPort(ip, clientPort), tlscfg)
+		}(ip)
+	}
+	go func() {
+		wg.Wait()
+		close(health)
+	}()
+
+	for h := range health {
+		if h {
 			return true
 		}
 	}
 
-	klog.V(2).Infof("All endpoints unhealthy for IPs: %v", iplist)
+	return false
+}
+
+func checkSingleEndpoint(ctx context.Context, endpoint string, tlscfg *tls.Config) bool {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	cliconfig := etcdcli.Config{
+		Endpoints:   []string{endpoint},
+		DialTimeout: 2 * time.Second,
+		TLS:         tlscfg,
+		Logger:      zap.NewNop(),
+	}
+
+	client, err := etcdcli.New(cliconfig)
+	if err != nil {
+		return false
+	}
+	defer client.Close()
+
+	_, err = client.Get(ctx, "health")
+	if err == nil || errors.Is(err, rpctypes.ErrPermissionDenied) {
+		resp, err := client.AlarmList(ctx)
+		if err == nil && len(resp.Alarms) == 0 {
+			return true
+		}
+	}
 	return false
 }
 
@@ -163,7 +209,7 @@ func readIPFile(nodeIPDir, ip string) ([]string, error) {
 }
 
 // checkReadyz checks if etcd endpoint is ready
-func checkReadyz(ipport string, tlscfg *tls.Config) bool {
+func CheckReadyz(ipport string, tlscfg *tls.Config) bool {
 	url := fmt.Sprintf("https://%s/readyz", ipport)
 
 	client := &http.Client{

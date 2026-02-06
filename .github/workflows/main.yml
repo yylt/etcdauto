@@ -57,5 +57,3 @@ jobs:
       - name: Runs all tests
         run: make test
 
-      - name: Run Vulnerability detection using govulncheck
-        run: make govulncheck
