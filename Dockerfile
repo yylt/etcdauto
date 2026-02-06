@@ -29,11 +29,7 @@ COPY --from=builder /bin/${TARGETPLATFORM}/ecsnode /usr/bin/
 COPY --from=ETCD /usr/local/bin/etcd /usr/bin/
 COPY --from=ETCD /usr/local/bin/etcdctl /usr/bin/
 
-RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends dumb-init curl && \
-    rm -rf /var/lib/apt/lists/*
 
-USER 65532:65532
+USER 65534:65534
 ENTRYPOINT ["etcdcluster"]
 

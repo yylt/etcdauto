@@ -22,10 +22,12 @@ type EnvConfig struct {
 	Max         int
 
 	// Network configuration
-	ClientPort string
-	PeerPort   string
-	ClientURLs []string
-	PeerURLs   []string
+	ClientPort     string
+	ClientHTTPPort string
+	PeerPort       string
+	ClientURLs     []string
+	ClientHTTPURLs []string
+	PeerURLs       []string
 
 	// Directory configuration
 	DataDir   string
@@ -50,29 +52,35 @@ func SetupEnvironment(cfg *EnvConfig) error {
 		"LABELS":       cfg.Labels,
 
 		// Network ports
-		"CLIENT_PORT": cfg.ClientPort,
-		"PEER_PORT":   cfg.PeerPort,
+		"CLIENT_PORT":      cfg.ClientPort,
+		"CLIENT_HTTP_PORT": cfg.ClientHTTPPort,
+		"PEER_PORT":        cfg.PeerPort,
 
 		// Directory configuration
 		"NODEIP_DIR": cfg.NodeIPDir,
 
 		// ETCD configuration
-		"ETCD_DATA_DIR":                                 cfg.DataDir,
-		"ETCD_NAME":                                     cfg.PodName,
-		"ETCD_ADVERTISE_CLIENT_URLS":                    strings.Join(cfg.ClientURLs, ","),
-		"ETCD_INITIAL_ADVERTISE_PEER_URLS":              strings.Join(cfg.PeerURLs, ","),
-		"ETCD_LISTEN_CLIENT_URLS":                       fmt.Sprintf("https://0.0.0.0:%s", cfg.ClientPort),
-		"ETCD_LISTEN_PEER_URLS":                         fmt.Sprintf("https://0.0.0.0:%s", cfg.PeerPort),
-		"ETCD_AUTO_COMPACTION_RETENTION":                "1",
-		"ETCD_EXPERIMENTAL_BACKEND_BBOLT_FREELIST_TYPE": "map",
-		"ETCD_QUOTA_BACKEND_BYTES":                      "8589934592",
-		"ETCD_LOGGER":                                   "zap",
-		"ETCD_EXPERIMENTAL_INITIAL_CORRUPT_CHECK":       "true",
-		"ETCD_METRICS":                                  "basic",
-		"ETCD_ELECTION_TIMEOUT":                         "2000",
-		"ETCD_HEARTBEAT_INTERVAL":                       "100",
-		"ETCD_INITIAL_CLUSTER_TOKEN":                    "etcd_tmpfs",
-		"ETCD_UNSUPPORTED_ARCH":                         "arm64",
+		"ETCD_DATA_DIR":                                     cfg.DataDir,
+		"ETCD_NAME":                                         cfg.PodName,
+		"ETCD_LOGGER":                                       "zap",
+		"ETCD_METRICS":                                      "basic",
+		"ETCD_ELECTION_TIMEOUT":                             "2000",
+		"ETCD_HEARTBEAT_INTERVAL":                           "200",
+		"ETCD_MAX_SNAPSHOTS":                                "5",
+		"ETCD_MAX_WALS":                                     "10",
+		"ETCD_ADVERTISE_CLIENT_URLS":                        strings.Join(cfg.ClientURLs, ","),
+		"ETCD_INITIAL_ADVERTISE_PEER_URLS":                  strings.Join(cfg.PeerURLs, ","),
+		"ETCD_LISTEN_CLIENT_URLS":                           fmt.Sprintf("https://0.0.0.0:%s", cfg.ClientPort),
+		"ETCD_LISTEN_PEER_URLS":                             fmt.Sprintf("https://0.0.0.0:%s", cfg.PeerPort),
+		"ETCD_LISTEN_CLIENT_HTTP_URLS":                      fmt.Sprintf("https://127.0.0.1:%s", cfg.ClientHTTPPort),
+		"ETCD_AUTO_COMPACTION_MODE":                         "periodic",
+		"ETCD_AUTO_COMPACTION_RETENTION":                    "5m",
+		"ETCD_BACKEND_BBOLT_FREELIST_TYPE":                  "map",
+		"ETCD_QUOTA_BACKEND_BYTES":                          "8589934592", // 8GB
+		"ETCD_INITIAL_CLUSTER_TOKEN":                        "etcd_tmpfs",
+		"ETCD_EXPERIMENTAL_INITIAL_CORRUPT_CHECK":           "true",
+		"ETCD_EXPERIMENTAL_ENABLE_LEASE_CHECKPOINT":         "true",
+		"ETCD_EXPERIMENTAL_ENABLE_LEASE_CHECKPOINT_PERSIST": "true",
 
 		// TLS settings
 		"ETCD_TRUSTED_CA_FILE":       filepath.Join(cfg.CertDir, "ca.pem"),
@@ -146,74 +154,16 @@ func CreateDirectories(dataDir, certDir string) error {
 	return nil
 }
 
-// WriteEnvFile writes environment variables to a file (for debugging/inspection)
-func WriteEnvFile(cfg *EnvConfig, filePath string) error {
-	var sb strings.Builder
-
-	sb.WriteString("#!/bin/bash\n\n")
-	sb.WriteString(fmt.Sprintf("export POD_IPS=%s\n", strings.Join(cfg.PodIPs, ",")))
-	sb.WriteString(fmt.Sprintf("export LABELS=\"%s\"\n", cfg.Labels))
-	sb.WriteString(fmt.Sprintf("export MAX=%d\n", cfg.Max))
-	sb.WriteString(fmt.Sprintf("export PEER_PORT=%s\n", cfg.PeerPort))
-	sb.WriteString(fmt.Sprintf("export SERVICE_NAME=%s\n", cfg.ServiceName))
-	sb.WriteString(fmt.Sprintf("export CLIENT_PORT=%s\n", cfg.ClientPort))
-	sb.WriteString(fmt.Sprintf("export NODEIP_DIR=%s\n", cfg.NodeIPDir))
-	sb.WriteString(fmt.Sprintf("export POD_NAME=%s\n", cfg.PodName))
-	sb.WriteString(fmt.Sprintf("export POD_NAMESPACE=%s\n", cfg.PodNamespace))
-	sb.WriteString(fmt.Sprintf("export ETCD_DATA_DIR=%s\n", cfg.DataDir))
-	sb.WriteString(fmt.Sprintf("export ETCD_ADVERTISE_CLIENT_URLS=%s\n", strings.Join(cfg.ClientURLs, ",")))
-	sb.WriteString(fmt.Sprintf("export ETCD_INITIAL_ADVERTISE_PEER_URLS=%s\n", strings.Join(cfg.PeerURLs, ",")))
-	sb.WriteString(fmt.Sprintf("export ETCD_LISTEN_CLIENT_URLS=https://0.0.0.0:%s\n", cfg.ClientPort))
-	sb.WriteString(fmt.Sprintf("export ETCD_LISTEN_PEER_URLS=https://0.0.0.0:%s\n", cfg.PeerPort))
-	sb.WriteString(fmt.Sprintf("export ETCD_NAME=%s\n", cfg.PodName))
-	sb.WriteString("export ETCD_AUTO_COMPACTION_RETENTION=1\n")
-	sb.WriteString("export ETCD_EXPERIMENTAL_BACKEND_BBOLT_FREELIST_TYPE=map\n")
-	sb.WriteString("export ETCD_QUOTA_BACKEND_BYTES=8589934592\n")
-	sb.WriteString("export ETCD_LOGGER=zap\n")
-	sb.WriteString("export ETCD_EXPERIMENTAL_INITIAL_CORRUPT_CHECK=true\n")
-	sb.WriteString("export ETCD_METRICS=basic\n")
-	sb.WriteString("export ETCD_ELECTION_TIMEOUT=2000\n")
-	sb.WriteString("export ETCD_HEARTBEAT_INTERVAL=100\n")
-	sb.WriteString("export ETCD_INITIAL_CLUSTER_TOKEN=etcd_tmpfs\n")
-	sb.WriteString(fmt.Sprintf("export ETCD_TRUSTED_CA_FILE=%s/ca.pem\n", cfg.CertDir))
-	sb.WriteString(fmt.Sprintf("export ETCD_CERT_FILE=%s/%s.pem\n", cfg.CertDir, cfg.PodName))
-	sb.WriteString(fmt.Sprintf("export ETCD_KEY_FILE=%s/%s-key.pem\n", cfg.CertDir, cfg.PodName))
-	sb.WriteString("export ETCD_CLIENT_CERT_AUTH=true\n")
-	sb.WriteString(fmt.Sprintf("export ETCD_PEER_TRUSTED_CA_FILE=%s/ca.pem\n", cfg.CertDir))
-	sb.WriteString(fmt.Sprintf("export ETCD_PEER_CERT_FILE=%s/%s.pem\n", cfg.CertDir, cfg.PodName))
-	sb.WriteString(fmt.Sprintf("export ETCD_PEER_KEY_FILE=%s/%s-key.pem\n", cfg.CertDir, cfg.PodName))
-	sb.WriteString("export ETCD_PEER_CLIENT_CERT_AUTH=true\n")
-	sb.WriteString("export ETCD_UNSUPPORTED_ARCH=arm64\n")
-	sb.WriteString("export TIMEOUT=5\n")
-	sb.WriteString(fmt.Sprintf("export ETCDCTL_CACERT=%s/ca.pem\n", cfg.CertDir))
-	sb.WriteString(fmt.Sprintf("export ETCDCTL_CERT=%s/%s.pem\n", cfg.CertDir, cfg.PodName))
-	sb.WriteString(fmt.Sprintf("export ETCDCTL_KEY=%s/%s-key.pem\n", cfg.CertDir, cfg.PodName))
-	sb.WriteString(fmt.Sprintf("export ETCDCTL_ENDPOINTS=https://127.0.0.1:%s\n", cfg.ClientPort))
-
-	if err := os.WriteFile(filePath, []byte(sb.String()), 0755); err != nil {
-		return fmt.Errorf("failed to write env file: %w", err)
-	}
-
-	klog.Infof("Environment file written to: %s", filePath)
-	return nil
-}
-
 // WriteReadyzScript writes the readyz health check script
-func WriteReadyzScript(podName, certDir, clientPort, scriptPath string) error {
+func WriteReadyzScript(envpath, scriptPath string) error {
 	script := fmt.Sprintf(`#!/bin/bash
 # Readiness probe script for etcd
-# Checks if etcd is ready to serve requests
 
-TIMEOUT=${TIMEOUT:-5}
-ETCDCTL_CERT=%s/%s.pem
-ETCDCTL_KEY=%s/%s-key.pem
-CLIENT_PORT=%s
+source %s
 
-timeout ${TIMEOUT} curl -k --cert ${ETCDCTL_CERT} --key ${ETCDCTL_KEY} -sf https://127.0.0.1:${CLIENT_PORT}/readyz
+timeout 2 etcdctl --insecure-skip-tls-verify endpoint health
 `,
-		certDir, podName,
-		certDir, podName,
-		clientPort,
+		envpath,
 	)
 
 	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
