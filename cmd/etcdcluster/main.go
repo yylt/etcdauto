@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/yylt/etcdauto/pkg/cluster"
 	etcdinit "github.com/yylt/etcdauto/pkg/init"
@@ -372,7 +373,6 @@ func runClusterLoop(cfg *Config) {
 				klog.Warningf("No alive endpoints found for '%s', waiting for pod-0 to initialize cluster", cfg.PodName)
 				break
 			}
-			// TODO: pod-0 discovery endpoint wrong maybe make brain split!
 			// Initialize new cluster (only pod-0)
 			klog.Info("No alive endpoints and I'm pod-0, initializing new cluster")
 			cmd, err := clusterMgr.InitializeNewCluster(cfg.MyIPs, ETCDBIN)
@@ -380,7 +380,19 @@ func runClusterLoop(cfg *Config) {
 				klog.Errorf("Failed to initialize new cluster: %v", err)
 				break
 			}
-			waitExit(cmd)
+
+			// Start brain split checker for pod-0
+			brainSplitCfg := &cluster.BrainSplitCheckConfig{
+				NodeIPDir:   cfg.NodeIPDir,
+				ClientPort:  cfg.ClientPort,
+				CertFile:    fmt.Sprintf("%s/%s.pem", cfg.CertDir, cfg.PodName),
+				KeyFile:     fmt.Sprintf("%s/%s-key.pem", cfg.CertDir, cfg.PodName),
+				MyPodName:   cfg.PodName,
+				MyIPs:       cfg.MyIPs,
+				CheckPeriod: 5 * time.Second,
+				MaxChecks:   3,
+			}
+			waitExitWithBrainSplitCheck(cmd, clusterMgr, brainSplitCfg)
 
 		default:
 			// Join existing cluster
@@ -446,6 +458,73 @@ func waitExit(cmd *exec.Cmd) {
 		klog.Info("Subprocess killed")
 	case <-processExitChan:
 		klog.Info("Subprocess exited, main process preparing to exit")
+	}
+
+	klog.Info("Main process exiting")
+	os.Exit(0)
+}
+
+// waitExitWithBrainSplitCheck waits for etcd process to exit, signal, or brain split detection
+func waitExitWithBrainSplitCheck(cmd *exec.Cmd, clusterMgr *cluster.Manager, brainSplitCfg *cluster.BrainSplitCheckConfig) {
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
+
+	processExitChan := make(chan bool, 1)
+	stopBrainSplitCheck := make(chan struct{})
+
+	go func() {
+		err := cmd.Wait()
+		if err != nil {
+			klog.Infof("Process exited with error: %v", err)
+		} else {
+			klog.Info("Process exited successfully")
+		}
+		processExitChan <- true
+	}()
+
+	// Start brain split checker
+	brainSplitResultCh := clusterMgr.StartBrainSplitChecker(brainSplitCfg, stopBrainSplitCheck)
+
+	klog.Info("Main process waiting for signal, subprocess exit, or brain split detection...")
+	select {
+	case s := <-signalChan:
+		close(stopBrainSplitCheck)
+		klog.Infof("Main process received signal: %v, preparing to exit", s)
+		if err := cmd.Process.Kill(); err != nil {
+			klog.Fatalf("Failed to kill subprocess: %v", err)
+		}
+		klog.Info("Subprocess killed")
+	case <-processExitChan:
+		close(stopBrainSplitCheck)
+		klog.Info("Subprocess exited, main process preparing to exit")
+	case result := <-brainSplitResultCh:
+		if result.BrainSplitDetected {
+			klog.Warningf("Brain split detected: %s", result.Reason)
+			klog.Warning("Terminating etcd to rejoin the existing cluster...")
+			if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+				klog.Errorf("Failed to send SIGTERM to etcd process: %v", err)
+				if err := cmd.Process.Kill(); err != nil {
+					klog.Fatalf("Failed to kill subprocess: %v", err)
+				}
+			}
+			// Wait for process to exit
+			<-processExitChan
+			klog.Info("Etcd process terminated due to brain split, will restart and rejoin cluster")
+			// Return instead of os.Exit to allow the main loop to retry
+			return
+		}
+		klog.Info("Brain split checker completed successfully, no brain split detected")
+		// Continue waiting for normal exit
+		select {
+		case s := <-signalChan:
+			klog.Infof("Main process received signal: %v, preparing to exit", s)
+			if err := cmd.Process.Kill(); err != nil {
+				klog.Fatalf("Failed to kill subprocess: %v", err)
+			}
+			klog.Info("Subprocess killed")
+		case <-processExitChan:
+			klog.Info("Subprocess exited, main process preparing to exit")
+		}
 	}
 
 	klog.Info("Main process exiting")

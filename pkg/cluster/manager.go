@@ -361,3 +361,186 @@ func (m *Manager) startEtcd(etcdBin string) (*exec.Cmd, error) {
 
 	return cmd, nil
 }
+
+// BrainSplitCheckConfig holds configuration for brain split detection
+type BrainSplitCheckConfig struct {
+	NodeIPDir   string
+	ClientPort  string
+	CertFile    string
+	KeyFile     string
+	MyPodName   string
+	MyIPs       []string // My own IPs to exclude from checking
+	CheckPeriod time.Duration
+	MaxChecks   int // Maximum number of successful checks before stopping (0 = unlimited)
+}
+
+// BrainSplitCheckResult represents the result of brain split detection
+type BrainSplitCheckResult struct {
+	BrainSplitDetected bool
+	Reason             string
+}
+
+// StartBrainSplitChecker starts a goroutine to periodically check for brain split.
+// For etcd-0, after initializing a new cluster, we need to verify that other nodes
+// joining the cluster include etcd-0 in their member list.
+// Returns a channel that will receive the result when brain split is detected or check completes.
+func (m *Manager) StartBrainSplitChecker(cfg *BrainSplitCheckConfig, stopCh <-chan struct{}) <-chan BrainSplitCheckResult {
+	resultCh := make(chan BrainSplitCheckResult, 1)
+
+	go func() {
+		defer close(resultCh)
+
+		if cfg.CheckPeriod <= 0 {
+			cfg.CheckPeriod = 5 * time.Second
+		}
+		if cfg.MaxChecks <= 0 {
+			cfg.MaxChecks = 60 // Default: check for up to 5 minutes (60 * 5s)
+		}
+
+		tlscfg, err := loadTLSConfig(cfg.CertFile, cfg.KeyFile)
+		if err != nil {
+			klog.Errorf("Brain split checker: failed to load TLS config: %v", err)
+			return
+		}
+
+		ticker := time.NewTicker(cfg.CheckPeriod)
+		defer ticker.Stop()
+
+		successCount := 0
+		klog.Infof("Brain split checker started for %s, checking every %v", cfg.MyPodName, cfg.CheckPeriod)
+
+		for {
+			select {
+			case <-stopCh:
+				klog.Info("Brain split checker stopped by signal")
+				return
+			case <-ticker.C:
+				result := m.checkBrainSplit(cfg, tlscfg)
+				if result.BrainSplitDetected {
+					klog.Warningf("Brain split detected: %s", result.Reason)
+					resultCh <- result
+					return
+				}
+
+				// If we found other nodes and they all include us, increment success count
+				if result.Reason == "verified" {
+					successCount++
+					klog.Infof("Brain split check passed (%d/%d)", successCount, cfg.MaxChecks)
+					if successCount >= cfg.MaxChecks {
+						klog.Info("Brain split checker: all checks passed, stopping checker")
+						resultCh <- BrainSplitCheckResult{
+							BrainSplitDetected: false,
+							Reason:             "all checks passed",
+						}
+						return
+					}
+				}
+			}
+		}
+	}()
+
+	return resultCh
+}
+
+// checkBrainSplit performs a single brain split check
+func (m *Manager) checkBrainSplit(cfg *BrainSplitCheckConfig, tlscfg *tls.Config) BrainSplitCheckResult {
+	// Build a set of my own IPs for quick lookup
+	myIPSet := make(map[string]struct{})
+	for _, ip := range cfg.MyIPs {
+		myIPSet[ip] = struct{}{}
+	}
+
+	// Read all IP files from nodeIPDir
+	entries, err := os.ReadDir(cfg.NodeIPDir)
+	if err != nil {
+		klog.V(2).Infof("Brain split check: failed to read nodeIPDir: %v", err)
+		return BrainSplitCheckResult{BrainSplitDetected: false, Reason: "read error"}
+	}
+
+	// Find other healthy nodes (excluding ourselves)
+	var otherEndpoints []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		masterIP := entry.Name()
+		if net.ParseIP(masterIP) == nil {
+			continue
+		}
+
+		// Skip if this is my own master IP
+		if _, isMyIP := myIPSet[masterIP]; isMyIP {
+			continue
+		}
+
+		// Read IP list from file
+		ips, err := readIPFile(cfg.NodeIPDir, masterIP)
+		if err != nil {
+			continue
+		}
+
+		// Check if any IP is healthy (skip my own IPs)
+		for _, ip := range ips {
+			if _, isMyIP := myIPSet[ip]; isMyIP {
+				continue
+			}
+			endpoint := net.JoinHostPort(ip, cfg.ClientPort)
+			if checkSingleEndpoint(context.Background(), endpoint, tlscfg) {
+				otherEndpoints = append(otherEndpoints, endpoint)
+			}
+		}
+	}
+
+	if len(otherEndpoints) == 0 {
+		// No other healthy nodes found yet, continue checking
+		klog.V(2).Info("Brain split check: no other healthy nodes found yet")
+		return BrainSplitCheckResult{BrainSplitDetected: false, Reason: "no other nodes"}
+	}
+
+	// Connect to other nodes and check if they include us in their member list
+	for _, endpoint := range otherEndpoints {
+		cliconfig := etcdcli.Config{
+			Endpoints:   []string{endpoint},
+			DialTimeout: 3 * time.Second,
+			TLS:         tlscfg,
+		}
+
+		client, err := etcdcli.New(cliconfig)
+		if err != nil {
+			klog.V(2).Infof("Brain split check: failed to connect to %s: %v", endpoint, err)
+			continue
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		resp, err := client.MemberList(ctx)
+		cancel()
+		client.Close()
+
+		if err != nil {
+			klog.V(2).Infof("Brain split check: failed to list members from %s: %v", endpoint, err)
+			continue
+		}
+
+		// Check if we are in the member list
+		foundSelf := false
+		for _, member := range resp.Members {
+			if member.Name == cfg.MyPodName {
+				foundSelf = true
+				break
+			}
+		}
+
+		if !foundSelf {
+			// Brain split detected: another cluster exists without us
+			return BrainSplitCheckResult{
+				BrainSplitDetected: true,
+				Reason:             fmt.Sprintf("endpoint %s has a cluster without %s", endpoint, cfg.MyPodName),
+			}
+		}
+
+		klog.V(2).Infof("Brain split check: endpoint %s includes %s in member list", endpoint, cfg.MyPodName)
+	}
+
+	return BrainSplitCheckResult{BrainSplitDetected: false, Reason: "verified"}
+}
