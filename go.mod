@@ -6,7 +6,7 @@ require (
 	github.com/golangci/golangci-lint v1.64.8
 	go.etcd.io/etcd/api/v3 v3.6.7
 	go.etcd.io/etcd/client/v3 v3.6.7
-	go.uber.org/zap v1.27.0
+	go.uber.org/zap v1.27.1
 	golang.org/x/vuln v1.1.4
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/api v0.35.0
