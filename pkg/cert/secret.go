@@ -1,6 +1,7 @@
 package cert
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"time"
@@ -153,6 +154,71 @@ func (sm *SecretManager) EnsureClientSecret(ctx context.Context, secretName stri
 
 	klog.Infof("Successfully created client secret %s/%s", sm.namespace, secretName)
 	return nil
+}
+
+// CopyCASecretData copies CA secret raw data (without parsing) into the target namespace managed by sm.
+// It creates the secret if it doesn't exist, or updates it when the data differs.
+func (sm *SecretManager) CopyCASecretData(ctx context.Context, secretName string, data map[string][]byte, annotations map[string]string) error {
+	existing, err := sm.client.CoreV1().Secrets(sm.namespace).Get(ctx, secretName, metav1.GetOptions{})
+	if err == nil {
+		// Already exists — check if data matches
+		if mapsEqual(existing.Data, data) {
+			klog.V(4).Infof("CA secret %s/%s already up-to-date, skipping", sm.namespace, secretName)
+			return nil
+		}
+		// Update to keep contents in sync
+		existing.Data = data
+		if _, err := sm.client.CoreV1().Secrets(sm.namespace).Update(ctx, existing, metav1.UpdateOptions{}); err != nil {
+			return fmt.Errorf("failed to update CA secret %s/%s: %w", sm.namespace, secretName, err)
+		}
+		klog.Infof("Updated CA secret %s/%s to match source", sm.namespace, secretName)
+		return nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return fmt.Errorf("failed to check CA secret %s/%s: %w", sm.namespace, secretName, err)
+	}
+
+	// Create new secret with copied data
+	ann := map[string]string{
+		AnnotationCreatedAt:    time.Now().Format(time.RFC3339),
+		AnnotationRotationFlag: "false",
+	}
+	for k, v := range annotations {
+		ann[k] = v
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        secretName,
+			Namespace:   sm.namespace,
+			Annotations: ann,
+			Labels: map[string]string{
+				"app.kubernetes.io/name":       "etcd",
+				"app.kubernetes.io/component":  "ca-certificate",
+				"app.kubernetes.io/managed-by": "etcdauto",
+			},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: data,
+	}
+	if _, err := sm.client.CoreV1().Secrets(sm.namespace).Create(ctx, secret, metav1.CreateOptions{}); err != nil {
+		return fmt.Errorf("failed to create CA secret %s/%s: %w", sm.namespace, secretName, err)
+	}
+	klog.Infof("Copied CA secret to %s/%s", sm.namespace, secretName)
+	return nil
+}
+
+// mapsEqual compares two []byte maps for equality.
+func mapsEqual(a, b map[string][]byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		bv, ok := b[k]
+		if !ok || !bytes.Equal(v, bv) {
+			return false
+		}
+	}
+	return true
 }
 
 // LoadCAFromSecret loads CA certificate from a secret

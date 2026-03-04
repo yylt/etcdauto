@@ -35,7 +35,7 @@ func LoadFromYaml(fp string) (*Config, error) {
 	return cfg, nil
 }
 
-func ApplyDefault(newcfg *Config, defaultns string) error {
+func ApplyDefault(newcfg *Config, selfNamespace string) error {
 	if newcfg == nil {
 		return fmt.Errorf("config is nil")
 	}
@@ -43,18 +43,18 @@ func ApplyDefault(newcfg *Config, defaultns string) error {
 	// Apply defaults for certificate config
 	if newcfg.Cert.Enabled {
 		if newcfg.Cert.CASecretNamespace == "" {
-			newcfg.Cert.CASecretNamespace = defaultns
+			newcfg.Cert.CASecretNamespace = selfNamespace
 		}
 		// Ensure CA namespace is in client namespaces
 		found := false
 		for _, ns := range newcfg.Cert.ClientSecretNamespaces {
-			if ns == newcfg.Cert.CASecretNamespace {
+			if ns == selfNamespace {
 				found = true
 				break
 			}
 		}
 		if !found {
-			newcfg.Cert.ClientSecretNamespaces = append(newcfg.Cert.ClientSecretNamespaces, newcfg.Cert.CASecretNamespace)
+			newcfg.Cert.ClientSecretNamespaces = append(newcfg.Cert.ClientSecretNamespaces, selfNamespace)
 		}
 		// Validate will initialize the namespace set
 		if err := newcfg.Cert.Valid(); err != nil {
@@ -64,7 +64,7 @@ func ApplyDefault(newcfg *Config, defaultns string) error {
 
 	if newcfg.Configmap.Name != "" {
 		if newcfg.Configmap.Namespace == "" {
-			newcfg.Configmap.Namespace = defaultns
+			newcfg.Configmap.Namespace = selfNamespace
 		}
 		if newcfg.Configmap.Valid() != nil {
 			return fmt.Errorf("configmap is invalid: %v", newcfg.Configmap)
@@ -72,17 +72,17 @@ func ApplyDefault(newcfg *Config, defaultns string) error {
 	}
 	if newcfg.ServiceConfig.Name != "" {
 		if newcfg.ServiceConfig.Namespace == "" {
-			newcfg.ServiceConfig.Namespace = defaultns
+			newcfg.ServiceConfig.Namespace = selfNamespace
 		}
 		if newcfg.ServiceConfig.Valid() != nil {
 			return fmt.Errorf("service is invalid: %v", newcfg.ServiceConfig)
 		}
 	}
 	if newcfg.PodConfig.Namespace == "" {
-		newcfg.PodConfig.Namespace = defaultns
+		newcfg.PodConfig.Namespace = selfNamespace
 	}
 	if newcfg.EcsNode.Namespace == "" {
-		newcfg.EcsNode.Namespace = defaultns
+		newcfg.EcsNode.Namespace = selfNamespace
 	}
 	switch {
 	case newcfg.EcsNode.Valid() != nil:

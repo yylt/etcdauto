@@ -95,7 +95,7 @@ func main() {
 	if err != nil {
 		klog.Fatalf("initialize manager failed: %v", err)
 	}
-	if err := setupControllers(mgr, cfg, restconfig); err != nil {
+	if err := setupControllers(mgr, cfg, restconfig, defaultns); err != nil {
 		klog.Fatalf("setup controllers failed: %v", err)
 	}
 
@@ -111,7 +111,7 @@ func main() {
 }
 
 // setupControllers initializes and adds all controllers to the manager
-func setupControllers(mgr ctrl.Manager, cfg *Config, restconfig *rest.Config) error {
+func setupControllers(mgr ctrl.Manager, cfg *Config, restconfig *rest.Config, selfNamespace string) error {
 	pubsub := util.NewPubSub()
 	ecsctl := controller.NewEcsNode(&cfg.EcsNode, pubsub, mgr)
 	poctl := controller.NewPod(&cfg.PodConfig, pubsub, mgr)
@@ -142,7 +142,7 @@ func setupControllers(mgr ctrl.Manager, cfg *Config, restconfig *rest.Config) er
 			return fmt.Errorf("failed to create kubernetes client: %w", err)
 		}
 
-		secretctl := controller.NewSecretSync(&cfg.Cert, mgr, clientset)
+		secretctl := controller.NewSecretSync(&cfg.Cert, selfNamespace, mgr, clientset)
 		if secretctl != nil {
 			if err := mgr.Add(secretctl); err != nil {
 				return fmt.Errorf("add secret controller failed: %w", err)
