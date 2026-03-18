@@ -105,8 +105,8 @@ func (sm *SecretManager) EnsureClientSecret(ctx context.Context, secretName stri
 		// Secret exists, do not update
 		klog.Infof("Client secret %s/%s already exists, skipping creation", sm.namespace, secretName)
 
-		// Verify the existing secret has required keys
-		requiredKeys := []string{CACertKey, ClientCertKey, ClientKeyKey}
+		// Verify the existing secret has required keys (only standard TLS keys)
+		requiredKeys := []string{corev1.TLSCertKey, corev1.TLSPrivateKeyKey}
 		for _, key := range requiredKeys {
 			if _, ok := existing.Data[key]; !ok {
 				return fmt.Errorf("existing client secret missing %s key", key)
@@ -138,10 +138,7 @@ func (sm *SecretManager) EnsureClientSecret(ctx context.Context, secretName stri
 		},
 		Type: corev1.SecretTypeTLS,
 		Data: map[string][]byte{
-			CACertKey:     ca.CertPEM,
-			ClientCertKey: client.CertPEM,
-			ClientKeyKey:  client.KeyPEM,
-			// Also add standard TLS secret keys for compatibility
+			CACertKey:               ca.CertPEM,
 			corev1.TLSCertKey:       client.CertPEM,
 			corev1.TLSPrivateKeyKey: client.KeyPEM,
 		},
