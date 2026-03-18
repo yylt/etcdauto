@@ -70,11 +70,11 @@ func (c *CertConfig) Valid() error {
 }
 
 type SecretSync struct {
-	config         *CertConfig
-	selfNamespace  string
-	client         ctrclient.Client
-	clientset      kubernetes.Interface
-	ca             *cert.CACertificate
+	config        *CertConfig
+	selfNamespace string
+	client        ctrclient.Client
+	clientset     kubernetes.Interface
+	ca            *cert.CACertificate
 }
 
 func NewSecretSync(config *CertConfig, selfNamespace string, mgr manager.Manager, clientset kubernetes.Interface) *SecretSync {
@@ -317,9 +317,9 @@ func (h *SecretSync) ensureClientCertificates(ctx context.Context) {
 
 // validateClientCert validates that the client certificate matches the CA
 func (h *SecretSync) validateClientCert(secret *corev1.Secret) bool {
-	// Check if secret has required keys
+	// Check if secret has required keys (only standard TLS keys)
 	caCertPEM, hasCACert := secret.Data[cert.CACertKey]
-	clientCertPEM, hasClientCert := secret.Data[cert.ClientCertKey]
+	clientCertPEM, hasClientCert := secret.Data[corev1.TLSCertKey]
 
 	if !hasCACert || !hasClientCert {
 		klog.Warningf("Client secret %s/%s missing required keys", secret.Namespace, secret.Name)
