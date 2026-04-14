@@ -5,7 +5,7 @@ go 1.25.3
 require (
 	github.com/golangci/golangci-lint v1.64.8
 	go.etcd.io/etcd/api/v3 v3.6.10
-	go.etcd.io/etcd/client/v3 v3.6.8
+	go.etcd.io/etcd/client/v3 v3.6.10
 	go.uber.org/zap v1.27.1
 	golang.org/x/vuln v1.1.4
 	gopkg.in/yaml.v3 v3.0.1
@@ -206,7 +206,7 @@ require (
 	gitlab.com/bosi/decorder v0.4.2 // indirect
 	go-simpler.org/musttag v0.13.0 // indirect
 	go-simpler.org/sloglint v0.9.0 // indirect
-	go.etcd.io/etcd/client/pkg/v3 v3.6.8 // indirect
+	go.etcd.io/etcd/client/pkg/v3 v3.6.10 // indirect
 	go.uber.org/automaxprocs v1.6.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
