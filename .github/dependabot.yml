@@ -16,6 +16,9 @@ updates:
       sig-k8s:
         patterns:
           - "sigs.k8s.io/*"
+      etcd:
+        patterns:
+          - "go.etcd.io/etcd/*"
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

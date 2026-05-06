@@ -143,72 +143,9 @@ func (h *SecretSync) NeedLeaderElection() bool { return true }
 func (h *SecretSync) Start(ctx context.Context) error {
 	klog.Info("Certificate management is enabled, initializing certificates...")
 
-	// Determine which namespace to look up the CA secret from
-	caNamespace := h.config.CASecretNamespace
-	crossNamespace := caNamespace != h.selfNamespace
-
-	// Create secret manager pointing at the configured CA namespace
-	caSecretMgr := cert.NewSecretManager(h.clientset, caNamespace)
-
-	// Try to load existing CA certificate
-	ca, err := caSecretMgr.LoadCAFromSecret(ctx, h.config.CASecretName)
+	ca, err := h.loadOrCreateCA(ctx)
 	if err != nil {
-		if crossNamespace {
-			// CA secret not found in the remote namespace.
-			// Fall back to self namespace: load or generate, then sync to the remote namespace.
-			klog.Infof("CA secret not found in namespace %s, checking self namespace %s: %v",
-				caNamespace, h.selfNamespace, err)
-
-			selfSecretMgr := cert.NewSecretManager(h.clientset, h.selfNamespace)
-			ca, err = selfSecretMgr.LoadCAFromSecret(ctx, h.config.CASecretName)
-			if err != nil {
-				klog.Infof("CA certificate not found in self namespace, generating new CA: %v", err)
-				ca, err = cert.GenerateCA(&cert.CAConfig{
-					CommonName:    h.config.CommonName,
-					Organization:  h.config.Organization,
-					ValidityYears: h.config.ValidityYears,
-				})
-				if err != nil {
-					return fmt.Errorf("failed to generate CA certificate: %w", err)
-				}
-				if err := selfSecretMgr.EnsureCASecret(ctx, h.config.CASecretName, ca); err != nil {
-					return fmt.Errorf("failed to create CA secret in self namespace: %w", err)
-				}
-				klog.Infof("Created CA secret in self namespace %s/%s", h.selfNamespace, h.config.CASecretName)
-			} else {
-				klog.Infof("Loaded existing CA from self namespace %s/%s", h.selfNamespace, h.config.CASecretName)
-			}
-
-			// Sync self-namespace secret data → remote CA namespace
-			if err := h.syncCAToNamespace(ctx, ca, caNamespace); err != nil {
-				return fmt.Errorf("failed to sync CA secret to namespace %s: %w", caNamespace, err)
-			}
-		} else {
-			// Same namespace: generate and create
-			klog.Infof("CA certificate not found, generating new CA: %v", err)
-			ca, err = cert.GenerateCA(&cert.CAConfig{
-				CommonName:    h.config.CommonName,
-				Organization:  h.config.Organization,
-				ValidityYears: h.config.ValidityYears,
-			})
-			if err != nil {
-				return fmt.Errorf("failed to generate CA certificate: %w", err)
-			}
-			if err := caSecretMgr.EnsureCASecret(ctx, h.config.CASecretName, ca); err != nil {
-				return fmt.Errorf("failed to create CA secret: %w", err)
-			}
-			klog.Infof("Successfully created CA certificate in secret %s/%s", caNamespace, h.config.CASecretName)
-		}
-	} else {
-		klog.Infof("Loaded existing CA certificate from secret %s/%s", caNamespace, h.config.CASecretName)
-
-		if crossNamespace {
-			// CA exists in remote namespace — copy it into the self namespace so local
-			// processes can access it without cross-namespace RBAC.
-			if err := h.syncCAToNamespace(ctx, ca, h.selfNamespace); err != nil {
-				return fmt.Errorf("failed to copy CA secret to self namespace %s: %w", h.selfNamespace, err)
-			}
-		}
+		return err
 	}
 
 	// Store CA for later use
@@ -220,6 +157,72 @@ func (h *SecretSync) Start(ctx context.Context) error {
 
 	klog.Info("Certificate initialization completed successfully")
 	return nil
+}
+
+func (h *SecretSync) loadOrCreateCA(ctx context.Context) (*cert.CACertificate, error) {
+	caNamespace := h.config.CASecretNamespace
+	crossNamespace := caNamespace != h.selfNamespace
+	caSecretMgr := cert.NewSecretManager(h.clientset, caNamespace)
+
+	ca, err := caSecretMgr.LoadCAFromSecret(ctx, h.config.CASecretName)
+	if err == nil {
+		klog.Infof("Loaded existing CA certificate from secret %s/%s", caNamespace, h.config.CASecretName)
+		if crossNamespace {
+			// CA exists in remote namespace — copy it into the self namespace so local
+			// processes can access it without cross-namespace RBAC.
+			if err := h.syncCAToNamespace(ctx, ca, h.selfNamespace); err != nil {
+				return nil, fmt.Errorf("failed to copy CA secret to self namespace %s: %w", h.selfNamespace, err)
+			}
+		}
+		return ca, nil
+	}
+
+	if crossNamespace {
+		// CA secret not found in the remote namespace.
+		// Fall back to self namespace: load or generate, then sync to the remote namespace.
+		klog.Infof("CA secret not found in namespace %s, checking self namespace %s: %v",
+			caNamespace, h.selfNamespace, err)
+
+		selfSecretMgr := cert.NewSecretManager(h.clientset, h.selfNamespace)
+		ca, err = selfSecretMgr.LoadCAFromSecret(ctx, h.config.CASecretName)
+		if err != nil {
+			klog.Infof("CA certificate not found in self namespace, generating new CA: %v", err)
+			ca, err = cert.GenerateCA(&cert.CAConfig{
+				CommonName:    h.config.CommonName,
+				Organization:  h.config.Organization,
+				ValidityYears: h.config.ValidityYears,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("failed to generate CA certificate: %w", err)
+			}
+			if err := selfSecretMgr.EnsureCASecret(ctx, h.config.CASecretName, ca); err != nil {
+				return nil, fmt.Errorf("failed to create CA secret in self namespace: %w", err)
+			}
+			klog.Infof("Created CA secret in self namespace %s/%s", h.selfNamespace, h.config.CASecretName)
+		} else {
+			klog.Infof("Loaded existing CA from self namespace %s/%s", h.selfNamespace, h.config.CASecretName)
+		}
+
+		if err := h.syncCAToNamespace(ctx, ca, caNamespace); err != nil {
+			return nil, fmt.Errorf("failed to sync CA secret to namespace %s: %w", caNamespace, err)
+		}
+		return ca, nil
+	}
+
+	klog.Infof("CA certificate not found, generating new CA: %v", err)
+	ca, err = cert.GenerateCA(&cert.CAConfig{
+		CommonName:    h.config.CommonName,
+		Organization:  h.config.Organization,
+		ValidityYears: h.config.ValidityYears,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate CA certificate: %w", err)
+	}
+	if err := caSecretMgr.EnsureCASecret(ctx, h.config.CASecretName, ca); err != nil {
+		return nil, fmt.Errorf("failed to create CA secret: %w", err)
+	}
+	klog.Infof("Successfully created CA certificate in secret %s/%s", caNamespace, h.config.CASecretName)
+	return ca, nil
 }
 
 func (h *SecretSync) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
