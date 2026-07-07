@@ -53,9 +53,6 @@ func (c *NodeConfig) SetDefaults() {
 	if c.MaxReplicas <= 0 {
 		c.MaxReplicas = 5
 	}
-	if c.StatefulSetNamespace == "" {
-		c.StatefulSetNamespace = "default"
-	}
 }
 
 type NodeCtrl struct {

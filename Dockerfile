@@ -1,8 +1,8 @@
 # syntax = docker/dockerfile:1.4
 
-ARG ETCD_IMAGE=gcr.io/etcd-development/etcd:v3.5.26
+ARG ETCD_IMAGE=gcr.io/etcd-development/etcd:v3.5.32
 
-FROM --platform=$BUILDPLATFORM golang:1.25 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
@@ -32,4 +32,3 @@ COPY --from=ETCD /usr/local/bin/etcdctl /usr/bin/
 
 USER 65534:65534
 ENTRYPOINT ["etcdcluster"]
-
