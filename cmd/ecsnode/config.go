@@ -15,6 +15,7 @@ type Config struct {
 	PodConfig     controller.PodConfig       `json:"pod" yaml:"pod"`
 	EcsNode       controller.EcsNodeConfig   `json:"ecsnode" yaml:"ecsnode"`
 	ServiceConfig controller.ServiceConfig   `json:"service" yaml:"service"`
+	Node          controller.NodeConfig      `json:"node,omitempty" yaml:"node,omitempty"`
 }
 
 // LoadConfigmap reads data from file-path
@@ -89,6 +90,15 @@ func ApplyDefault(newcfg *Config, selfNamespace string) error {
 		return fmt.Errorf("invalid ecnsnode config: %v, failed: %w", newcfg.EcsNode, newcfg.EcsNode.Valid())
 	case newcfg.PodConfig.Valid() != nil:
 		return fmt.Errorf("invalid pod config: %v, failed: %w", newcfg.PodConfig, newcfg.PodConfig.Valid())
+	}
+	if newcfg.Node.StatefulSetName != "" {
+		newcfg.Node.SetDefaults()
+		if newcfg.Node.StatefulSetNamespace == "" {
+			newcfg.Node.StatefulSetNamespace = selfNamespace
+		}
+		if newcfg.Node.Valid() != nil {
+			return fmt.Errorf("invalid node config: %v, failed: %w", newcfg.Node, newcfg.Node.Valid())
+		}
 	}
 	return nil
 }

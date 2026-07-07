@@ -5,6 +5,7 @@ import "time"
 const (
 	EcsNodeTopic = "/ecsnode"
 	PodTopic     = "/pod"
+	NodeTopic    = "/node"
 
 	RequeuDelay = 5 * time.Second
 )
