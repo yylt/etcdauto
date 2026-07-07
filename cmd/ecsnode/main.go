@@ -135,18 +135,29 @@ func setupControllers(mgr ctrl.Manager, cfg *Config, restconfig *rest.Config, se
 			return fmt.Errorf("add configmap controller failed: %w", err)
 		}
 	}
-	if cfg.Cert.Enabled {
-		// Create Kubernetes clientset for secret controller
-		clientset, err := kubernetes.NewForConfig(restconfig)
+
+	needsClientset := cfg.Cert.Enabled || cfg.Node.StatefulSetName != ""
+	var clientset kubernetes.Interface
+	if needsClientset {
+		var err error
+		clientset, err = kubernetes.NewForConfig(restconfig)
 		if err != nil {
 			return fmt.Errorf("failed to create kubernetes client: %w", err)
 		}
+	}
 
+	if cfg.Cert.Enabled {
 		secretctl := controller.NewSecretSync(&cfg.Cert, selfNamespace, mgr, clientset)
 		if secretctl != nil {
 			if err := mgr.Add(secretctl); err != nil {
 				return fmt.Errorf("add secret controller failed: %w", err)
 			}
+		}
+	}
+	if cfg.Node.StatefulSetName != "" {
+		ndctl := controller.NewNodeCtrl(&cfg.Node, pubsub, mgr, clientset)
+		if err := mgr.Add(ndctl); err != nil {
+			return fmt.Errorf("add node controller failed: %w", err)
 		}
 	}
 
