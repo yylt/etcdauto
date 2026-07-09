@@ -4,19 +4,24 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/yylt/etcdauto/pkg/util"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrclient "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 type NodeConfig struct {
@@ -65,9 +70,6 @@ type NodeCtrl struct {
 	ps      *util.PubSub
 	trigger chan struct{}
 
-	currentReplicas int32
-	nodeCount       int
-
 	labelSelector labels.Selector
 }
 
@@ -92,6 +94,15 @@ func NewNodeCtrl(config *NodeConfig, ps *util.PubSub, mgr manager.Manager, clien
 			}
 			return !n.labelSelector.Matches(labels.Set(object.GetLabels()))
 		})).
+		Watches(
+			&appsv1.StatefulSet{},
+			handler.EnqueueRequestsFromMapFunc(func(_ context.Context, obj ctrclient.Object) []reconcile.Request {
+				if obj.GetName() == config.StatefulSetName && obj.GetNamespace() == config.StatefulSetNamespace {
+					return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: "__sts__", Namespace: config.StatefulSetNamespace}}}
+				}
+				return nil
+			}),
+		).
 		Complete(n)
 	if err != nil {
 		klog.Fatal(err)
@@ -120,7 +131,21 @@ func (n *NodeCtrl) Start(ctx context.Context) error {
 	return nil
 }
 
+func (n *NodeCtrl) triggerSync() {
+	select {
+	case n.trigger <- struct{}{}:
+	default:
+		klog.V(2).Infof("trigger channel full, skipping")
+	}
+}
+
 func (n *NodeCtrl) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	if req.Name == "__sts__" {
+		klog.V(2).Infof("statefulset %s/%s changed, trigger sync", n.config.StatefulSetNamespace, n.config.StatefulSetName)
+		n.triggerSync()
+		return ctrl.Result{}, nil
+	}
+
 	var (
 		node corev1.Node
 	)
@@ -132,7 +157,7 @@ func (n *NodeCtrl) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			klog.Infof("node %s deleted", req.Name)
-			n.trigger <- struct{}{}
+			n.triggerSync()
 			return ctrl.Result{}, nil
 		}
 		klog.Errorf("get node %s failed: %v", req.Name, err)
@@ -141,11 +166,11 @@ func (n *NodeCtrl) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result
 
 	if node.DeletionTimestamp != nil {
 		klog.Infof("node %s is deleting", req.Name)
-		n.trigger <- struct{}{}
+		n.triggerSync()
 		return ctrl.Result{}, nil
 	}
 
-	n.trigger <- struct{}{}
+	n.triggerSync()
 	return ctrl.Result{}, nil
 }
 
@@ -161,7 +186,7 @@ func (n *NodeCtrl) syncReplicas(ctx context.Context) {
 	klog.Infof("node count: %d (total: %d)", count, len(nodes.Items))
 
 	var desiredReplicas int32
-	if count < 5 {
+	if count < n.config.MaxReplicas {
 		desiredReplicas = int32(n.config.MinReplicas)
 	} else {
 		desiredReplicas = int32(n.config.MaxReplicas)
@@ -170,35 +195,46 @@ func (n *NodeCtrl) syncReplicas(ctx context.Context) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	sts, err := n.clientset.AppsV1().StatefulSets(n.config.StatefulSetNamespace).
-		Get(ctx, n.config.StatefulSetName, metav1.GetOptions{})
-	if err != nil {
-		klog.Errorf("get statefulset %s/%s failed: %v", n.config.StatefulSetNamespace, n.config.StatefulSetName, err)
+	ns := n.config.StatefulSetNamespace
+	name := n.config.StatefulSetName
+
+	for i := range 3 {
+		sts, err := n.clientset.AppsV1().StatefulSets(ns).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				klog.V(2).Infof("statefulset %s/%s not found, skip sync", ns, name)
+				return
+			}
+			klog.Errorf("get statefulset %s/%s failed: %v", ns, name, err)
+			return
+		}
+
+		if sts.Spec.Replicas == nil {
+			klog.Errorf("statefulset %s/%s replicas is nil", ns, name)
+			return
+		}
+
+		current := *sts.Spec.Replicas
+		if current == desiredReplicas {
+			klog.V(2).Infof("statefulset %s/%s current=%d, no change needed", ns, name, current)
+			return
+		}
+
+		sts.Spec.Replicas = &desiredReplicas
+		_, err = n.clientset.AppsV1().StatefulSets(ns).Update(ctx, sts, metav1.UpdateOptions{})
+		if err == nil {
+			klog.Infof("statefulset %s/%s current=%d -> expect=%d", ns, name, current, desiredReplicas)
+			return
+		}
+		if apierrors.IsConflict(err) {
+			klog.V(2).Infof("statefulset %s/%s update conflict, retrying (%d/3)", ns, name, i+1)
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		klog.Errorf("update statefulset %s/%s current=%d -> expect=%d failed: %v", ns, name, current, desiredReplicas, err)
 		return
 	}
-
-	if sts.Spec.Replicas == nil {
-		klog.Errorf("statefulset %s/%s replicas is nil", n.config.StatefulSetNamespace, n.config.StatefulSetName)
-		return
-	}
-
-	current := *sts.Spec.Replicas
-	if current == desiredReplicas {
-		klog.V(2).Infof("statefulset %s/%s replicas already %d, no change needed", n.config.StatefulSetNamespace, n.config.StatefulSetName, desiredReplicas)
-		return
-	}
-
-	sts.Spec.Replicas = &desiredReplicas
-	_, err = n.clientset.AppsV1().StatefulSets(n.config.StatefulSetNamespace).
-		Update(ctx, sts, metav1.UpdateOptions{})
-	if err != nil {
-		klog.Errorf("update statefulset %s/%s replicas to %d failed: %v", n.config.StatefulSetNamespace, n.config.StatefulSetName, desiredReplicas, err)
-		return
-	}
-
-	n.currentReplicas = desiredReplicas
-	n.nodeCount = count
-	klog.Infof("statefulset %s/%s replicas updated: %d -> %d (node count: %d)", n.config.StatefulSetNamespace, n.config.StatefulSetName, current, desiredReplicas, count)
+	klog.Errorf("statefulset %s/%s update failed after 3 retries", ns, name)
 }
 
 func (n *NodeCtrl) countNodes(nodes *corev1.NodeList) int {
