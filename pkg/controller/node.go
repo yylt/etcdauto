@@ -26,6 +26,7 @@ import (
 
 type NodeConfig struct {
 	ExcludeLabels        map[string]string `json:"excludeLabels,omitempty" yaml:"excludeLabels,omitempty"`
+	IncludeLabels        map[string]string `json:"includeLabels,omitempty" yaml:"includeLabels,omitempty"`
 	StatefulSetName      string            `json:"statefulsetName" yaml:"statefulsetName"`
 	StatefulSetNamespace string            `json:"statefulsetNamespace,omitempty" yaml:"statefulsetNamespace,omitempty"`
 	MinReplicas          int               `json:"minReplicas,omitempty" yaml:"minReplicas,omitempty"`
@@ -47,6 +48,9 @@ func (c *NodeConfig) Valid() error {
 	}
 	if c.MinReplicas > c.MaxReplicas {
 		return fmt.Errorf("minReplicas(%d) must not exceed maxReplicas(%d)", c.MinReplicas, c.MaxReplicas)
+	}
+	if len(c.IncludeLabels) > 0 && len(c.ExcludeLabels) > 0 {
+		return fmt.Errorf("includeLabels and excludeLabels are mutually exclusive")
 	}
 	return nil
 }
@@ -71,6 +75,7 @@ type NodeCtrl struct {
 	trigger chan struct{}
 
 	labelSelector labels.Selector
+	inclusive     bool
 }
 
 func NewNodeCtrl(config *NodeConfig, ps *util.PubSub, mgr manager.Manager, clientset kubernetes.Interface) *NodeCtrl {
@@ -82,7 +87,10 @@ func NewNodeCtrl(config *NodeConfig, ps *util.PubSub, mgr manager.Manager, clien
 		trigger:   make(chan struct{}, 10),
 	}
 
-	if len(config.ExcludeLabels) > 0 {
+	if len(config.IncludeLabels) > 0 {
+		n.labelSelector = labels.SelectorFromSet(config.IncludeLabels)
+		n.inclusive = true
+	} else if len(config.ExcludeLabels) > 0 {
 		n.labelSelector = labels.SelectorFromSet(config.ExcludeLabels)
 	}
 
@@ -92,7 +100,11 @@ func NewNodeCtrl(config *NodeConfig, ps *util.PubSub, mgr manager.Manager, clien
 			if n.labelSelector == nil {
 				return true
 			}
-			return !n.labelSelector.Matches(labels.Set(object.GetLabels()))
+			matched := n.labelSelector.Matches(labels.Set(object.GetLabels()))
+			if n.inclusive {
+				return matched
+			}
+			return !matched
 		})).
 		Watches(
 			&appsv1.StatefulSet{},
@@ -244,8 +256,15 @@ func (n *NodeCtrl) countNodes(nodes *corev1.NodeList) int {
 
 	count := 0
 	for _, node := range nodes.Items {
-		if !n.labelSelector.Matches(labels.Set(node.Labels)) {
-			count++
+		matched := n.labelSelector.Matches(labels.Set(node.Labels))
+		if n.inclusive {
+			if matched {
+				count++
+			}
+		} else {
+			if !matched {
+				count++
+			}
 		}
 	}
 	return count
