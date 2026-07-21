@@ -17,6 +17,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	ctrclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -95,8 +96,7 @@ func NewNodeCtrl(config *NodeConfig, ps *util.PubSub, mgr manager.Manager, clien
 	}
 
 	err := ctrl.NewControllerManagedBy(mgr).
-		For(&corev1.Node{}).
-		WithEventFilter(predicate.NewPredicateFuncs(func(object ctrclient.Object) bool {
+		For(&corev1.Node{}, builder.WithPredicates(predicate.NewPredicateFuncs(func(object ctrclient.Object) bool {
 			if n.labelSelector == nil {
 				return true
 			}
@@ -105,7 +105,7 @@ func NewNodeCtrl(config *NodeConfig, ps *util.PubSub, mgr manager.Manager, clien
 				return matched
 			}
 			return !matched
-		})).
+		}))).
 		Watches(
 			&appsv1.StatefulSet{},
 			handler.EnqueueRequestsFromMapFunc(func(_ context.Context, obj ctrclient.Object) []reconcile.Request {
