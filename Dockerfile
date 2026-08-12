@@ -1,14 +1,14 @@
 # syntax = docker/dockerfile:1.4
 
-ARG ETCD_IMAGE=gcr.io/etcd-development/etcd:v3.5.32
+ARG ETCD_IMAGE=quay.io/coreos/etcd:v3.5.32
 
-FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.26.5 AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
 ARG TARGETPLATFORM
 
-WORKDIR /
+WORKDIR /app
 
 COPY . .
 
@@ -19,12 +19,12 @@ RUN BUILD_PLATFORMS=${TARGETPLATFORM} make build
 
 FROM ${ETCD_IMAGE} as ETCD
 
-FROM debian:12-slim
+FROM docker.io/library/debian:12.15-slim
 
 ARG TARGETPLATFORM
 
-COPY --from=builder /bin/${TARGETPLATFORM}/etcdcluster /usr/bin/
-COPY --from=builder /bin/${TARGETPLATFORM}/ecsnode /usr/bin/
+COPY --from=builder /app/bin/${TARGETPLATFORM}/etcdcluster /usr/bin/
+COPY --from=builder /app/bin/${TARGETPLATFORM}/ecsnode /usr/bin/
 
 COPY --from=ETCD /usr/local/bin/etcd /usr/bin/
 COPY --from=ETCD /usr/local/bin/etcdctl /usr/bin/

@@ -13,8 +13,6 @@ updates:
       k8s:
         patterns:
           - "k8s.io/*"
-      sig-k8s:
-        patterns:
           - "sigs.k8s.io/*"
       etcd:
         patterns:

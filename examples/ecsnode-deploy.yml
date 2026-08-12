@@ -1,0 +1,146 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: etcd-ecsnode
+  namespace: default
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 3
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: ecsnode
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: ecsnode
+    spec:
+      containers:
+      - command:
+        - ecsnode
+        - -config
+        - /app/config.yaml
+        env:
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.namespace
+        image: multiarch/etcdcluster:dev
+        imagePullPolicy: Always
+        name: ecsnode
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 32Mi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /app
+          name: etc
+      dnsPolicy: ClusterFirst
+      nodeSelector:
+        openstack-control-plane: enabled
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      serviceAccount: ecsnode
+      serviceAccountName: ecsnode
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - configMap:
+          defaultMode: 420
+          name: ecsnode-etc
+        name: etc
+---
+apiVersion: v1
+data:
+  ca-key.pem: LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tCk1JR0hBZ0VBTUJNR0J5cUdTTTQ5QWdFR0NDcUdTTTQ5QXdFSEJHMHdhd0lCQVFRZ0J6NXpRa1FyaEFSOEhpSFoKY0lHeHV2cGQ4WUNiMDdWc1FtS3k5cW5LSjBpaFJBTkNBQVM5dUd4aW02ckttT3IrODJJZVcwQjc5YXN0bXZEZQpvQ1h5UVZjZG5Bc2QwdWNjekY2ajhyNUZuQVBheXNscVpMUlQ0NkY2UGQrbFBpcnRUVXlLcXRxVAotLS0tLUVORCBQUklWQVRFIEtFWS0tLS0tCg==
+  ca.pem: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUJyVENDQVZPZ0F3SUJBZ0lVSEZvekllbG5nSmVGK1pyTzVPTDRza2t0Ri93d0NnWUlLb1pJemowRUF3SXcKS3pFVk1CTUdBMVVFQXd3TVJXRnplVk4wWVdOckxVTkJNUkl3RUFZRFZRUUtEQWxGWVhONVUzUmhZMnN3SUJjTgpNall3T0RBME1EUXpPRE0wV2hnUE1qRXlOakEzTVRFd05ETTRNelJhTUNzeEZUQVRCZ05WQkFNTURFVmhjM2xUCmRHRmpheTFEUVRFU01CQUdBMVVFQ2d3SlJXRnplVk4wWVdOck1Ga3dFd1lIS29aSXpqMENBUVlJS29aSXpqMEQKQVFjRFFnQUV2YmhzWXB1cXlwanEvdk5pSGx0QWUvV3JMWnJ3M3FBbDhrRlhIWndMSGRMbkhNeGVvL0srUlp3RAoyc3JKYW1TMFUrT2hlajNmcFQ0cTdVMU1pcXJhazZOVE1GRXdIUVlEVlIwT0JCWUVGQ2hGWHpESU1hckY5aFloCklWMzdBUXo1Yzh0OE1COEdBMVVkSXdRWU1CYUFGQ2hGWHpESU1hckY5aFloSVYzN0FRejVjOHQ4TUE4R0ExVWQKRXdFQi93UUZNQU1CQWY4d0NnWUlLb1pJemowRUF3SURTQUF3UlFJZ0pXOS8zK2NEVytQYzBBN21nYVdSbGJhZQpBTDhnWTlnTHNKZ3VFQ2JjTGZJQ0lRQ3FROVNLRHMrNmVQK25sV05GVFhvNkVzQ0xCSlhMZEV3dEFsUnp6YWlBCkxRPT0KLS0tLS1FTkQgQ0VSVElGSUNBVEUtLS0tLQo=
+kind: Secret
+metadata:
+  name: ca-cert
+  namespace: default
+type: Opaque
+---
+apiVersion: v1
+data:
+  config.yaml: |-
+    cert:
+      enabled: true
+      caSecretName: "ca-cert"
+      clientSecretName: "client-crt"
+      validityYears: 100
+      organization: "etcdauto"
+      commonName: "etcdauto-ca"
+
+    configmap:
+      name: nodeips
+    ecsnode:
+      namespace: glia
+      interfaces:
+      - roller
+      - management
+      - storagepub
+      masterif: roller
+    pod:
+      labels:
+        component: etcd
+    service:
+      name: etcd
+      ports:
+      - targetPort: 2479
+        port: 2479
+        protocol: TCP
+    node:
+      includeLabels:
+        openstack-control-plane: enabled
+      statefulsetName: "etcd-server"
+      minReplicas: 3
+      maxReplicas: 5
+kind: ConfigMap
+metadata:
+  name: ecsnode-etc
+  namespace: default
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ecsnode
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ecsnode-role
+rules:
+  - apiGroups: ["cluster.ecas.io"]
+    resources: ["*"]
+    verbs: ["*"]
+  - apiGroups: ["", "coordination.k8s.io"]
+    resources: ["*"]
+    verbs: ["*"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ecsnode-binding
+subjects:
+- kind: ServiceAccount
+  name: ecsnode
+  namespace: default
+roleRef:
+  kind: ClusterRole
+  name: ecsnode-role
+  apiGroup: rbac.authorization.k8s.io
