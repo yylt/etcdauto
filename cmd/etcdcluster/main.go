@@ -366,15 +366,40 @@ func runClusterLoop(cfg *Config) {
 			continue
 		}
 
-		switch len(endpointInfo.AliveEndpoints) {
-		case 0:
-			// No alive endpoints
+		switch {
+		case len(endpointInfo.ReadyNodes) > 0:
+			// Join existing cluster
+			klog.Infof("Found %d ready nodes, attempting to join cluster", len(endpointInfo.ReadyNodes))
+			client, err := clusterMgr.GetClient(endpointInfo.ReadyNodes)
+			if err != nil {
+				klog.Errorf("Failed to get etcd client: %v", err)
+				break
+			}
+
+			cmd, err := clusterMgr.JoinExistingCluster(client, cfg.MyIPs, endpointInfo.DeadNames, ETCDBIN)
+			if err == nil {
+				waitExit(cmd)
+			} else {
+				klog.Errorf("Failed to join existing cluster: %v", err)
+			}
+
+		case len(endpointInfo.ReadyNodes) == 0 && len(endpointInfo.NotReadyNodes) > 0:
+			// Other nodes exist but etcd is not ready (starting up, NoLeader, etc.)
+			// Don't wait — retry immediately
+			klog.Infof("Found %d not-ready node(s), retrying immediately", len(endpointInfo.NotReadyNodes))
+
+		case len(endpointInfo.ReadyNodes) == 0 && len(endpointInfo.NotReadyNodes) == 0:
+			// No ready nodes and no not-ready nodes:
+			// All other nodes are HealthUnreachable (no etcd running) or no other node files exist.
+			// Since nodeIPDir is a static ConfigMap with all node IP files always present,
+			// HealthUnreachable means no etcd process is running on other nodes → safe to init.
 			if cfg.MyIndex != 0 {
-				klog.Warningf("No alive endpoints found for '%s', waiting for pod-0 to initialize cluster", cfg.PodName)
+				klog.Warningf("No ready or not-ready nodes found for '%s', waiting for pod-0 to initialize cluster", cfg.PodName)
+				time.Sleep(2 * time.Second)
 				break
 			}
 			// Initialize new cluster (only pod-0)
-			klog.Info("No alive endpoints and I'm pod-0, initializing new cluster")
+			klog.Info("No other cluster found and I'm pod-0, initializing new cluster")
 			cmd, err := clusterMgr.InitializeNewCluster(cfg.MyIPs, ETCDBIN)
 			if err != nil {
 				klog.Errorf("Failed to initialize new cluster: %v", err)
@@ -390,25 +415,8 @@ func runClusterLoop(cfg *Config) {
 				MyPodName:   cfg.PodName,
 				MyIPs:       cfg.MyIPs,
 				CheckPeriod: 5 * time.Second,
-				MaxChecks:   3,
 			}
 			waitExitWithBrainSplitCheck(cmd, clusterMgr, brainSplitCfg)
-
-		default:
-			// Join existing cluster
-			klog.Infof("Found %d alive endpoints, attempting to join cluster", len(endpointInfo.AliveEndpoints))
-			client, err := clusterMgr.GetClient(endpointInfo.AliveEndpoints)
-			if err != nil {
-				klog.Errorf("Failed to get etcd client: %v", err)
-				break
-			}
-
-			cmd, err := clusterMgr.JoinExistingCluster(client, cfg.MyIPs, endpointInfo.DeadNames, ETCDBIN)
-			if err == nil {
-				waitExit(cmd)
-			} else {
-				klog.Errorf("Failed to join existing cluster: %v", err)
-			}
 		}
 	}
 }

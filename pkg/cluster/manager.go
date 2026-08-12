@@ -123,18 +123,19 @@ func (m *Manager) JoinExistingCluster(client etcdcli.Cluster, myIPs []string, de
 		return nil, fmt.Errorf("failed to list members: %w", err)
 	}
 
-	myMemberID, myIsLearner, aliveNumExceptMe := m.processMembers(ctx, client, resp.Members, deadnames)
+	myMemberID, myIsLearner, votingNumExceptMe := m.processMembers(ctx, client, resp.Members, deadnames)
 
 	// Handle existing member or add new member
-	return m.handleMemberJoin(ctx, client, myMemberID, myIsLearner, myIPs, aliveNumExceptMe, etcdBin)
+	return m.handleMemberJoin(ctx, client, myMemberID, myIsLearner, myIPs, votingNumExceptMe, etcdBin)
 }
 
-// processMembers processes the member list, removes dead members, and finds current pod
+// processMembers processes the member list, removes dead members, and finds current pod.
+// Returns: myMemberID, myIsLearner, votingNumExceptMe (count of non-learner, non-self members).
 func (m *Manager) processMembers(ctx context.Context, client etcdcli.Cluster, members []*pb.Member, deadnames map[string]struct{}) (uint64, bool, int) {
 	var (
-		myMemberID       uint64
-		myIsLearner      bool
-		aliveNumExceptMe int
+		myMemberID        uint64
+		myIsLearner       bool
+		votingNumExceptMe int
 	)
 
 	for _, member := range members {
@@ -163,12 +164,13 @@ func (m *Manager) processMembers(ctx context.Context, client etcdcli.Cluster, me
 
 		if shouldRemove {
 			m.removeDeadMember(ctx, client, member)
-		} else {
-			aliveNumExceptMe++
+		} else if !member.IsLearner {
+			// Only count voting (non-learner) members
+			votingNumExceptMe++
 		}
 	}
 
-	return myMemberID, myIsLearner, aliveNumExceptMe
+	return myMemberID, myIsLearner, votingNumExceptMe
 }
 
 // removeDeadMember removes a dead member from the cluster
@@ -183,14 +185,14 @@ func (m *Manager) removeDeadMember(ctx context.Context, client etcdcli.Cluster, 
 }
 
 // handleMemberJoin handles joining logic based on member state
-func (m *Manager) handleMemberJoin(ctx context.Context, client etcdcli.Cluster, myMemberID uint64, myIsLearner bool, myIPs []string, aliveNumExceptMe int, etcdBin string) (*exec.Cmd, error) {
+func (m *Manager) handleMemberJoin(ctx context.Context, client etcdcli.Cluster, myMemberID uint64, myIsLearner bool, myIPs []string, votingNumExceptMe int, etcdBin string) (*exec.Cmd, error) {
 	dataDir := filepath.Join(m.cfg.DataDir, "member")
 
 	if myMemberID != 0 {
 		if util.DirExists(dataDir) {
-			return m.handleExistingMemberWithData(client, myMemberID, myIsLearner, etcdBin)
+			return m.handleExistingMemberWithData(ctx, client, myMemberID, myIsLearner, etcdBin)
 		}
-		return m.handleExistingMemberWithoutData(ctx, client, myMemberID, myIPs, aliveNumExceptMe, etcdBin)
+		return m.handleExistingMemberWithoutData(ctx, client, myMemberID, myIPs, votingNumExceptMe, etcdBin)
 	}
 
 	if util.DirExists(dataDir) {
@@ -199,25 +201,29 @@ func (m *Manager) handleMemberJoin(ctx context.Context, client etcdcli.Cluster, 
 	}
 
 	// Add member and start etcd
-	return m.addMemberAndStart(client, myIPs, aliveNumExceptMe, etcdBin)
+	return m.addMemberAndStart(client, myIPs, votingNumExceptMe, etcdBin)
 }
 
 // handleExistingMemberWithData handles case where member exists in cluster and has data
-func (m *Manager) handleExistingMemberWithData(client etcdcli.Cluster, myMemberID uint64, myIsLearner bool, etcdBin string) (*exec.Cmd, error) {
+func (m *Manager) handleExistingMemberWithData(ctx context.Context, client etcdcli.Cluster, myMemberID uint64, myIsLearner bool, etcdBin string) (*exec.Cmd, error) {
 	dataDir := filepath.Join(m.cfg.DataDir, "member")
 	klog.Infof("my id=%016x, IsLearner=%v, dataDir exists at %s", myMemberID, myIsLearner, dataDir)
 
 	if myIsLearner {
 		err := m.promoteLearner(client, myMemberID)
 		if err != nil {
-			return nil, fmt.Errorf("failed to promote learner: %w", err)
+			// Promotion failed: remove this learner and local data to avoid infinite loop
+			klog.Errorf("Failed to promote learner: %v, removing member and data", err)
+			m.removeDeadMember(ctx, client, &pb.Member{ID: myMemberID})
+			os.RemoveAll(dataDir)
+			return nil, fmt.Errorf("failed to promote learner, cleaned up: %w", err)
 		}
 	}
 	return m.startEtcd(etcdBin)
 }
 
 // handleExistingMemberWithoutData handles case where member exists in cluster but has no data
-func (m *Manager) handleExistingMemberWithoutData(ctx context.Context, client etcdcli.Cluster, myMemberID uint64, myIPs []string, aliveNumExceptMe int, etcdBin string) (*exec.Cmd, error) {
+func (m *Manager) handleExistingMemberWithoutData(ctx context.Context, client etcdcli.Cluster, myMemberID uint64, myIPs []string, votingNumExceptMe int, etcdBin string) (*exec.Cmd, error) {
 	_, err := client.MemberRemove(ctx, myMemberID)
 	if err != nil {
 		klog.Errorf("failed to remove my by id(%016x): %s", myMemberID, err)
@@ -226,7 +232,7 @@ func (m *Manager) handleExistingMemberWithoutData(ctx context.Context, client et
 	klog.Infof("Successfully removed member %016x, will rejoin as new member", myMemberID)
 
 	// Add member and start etcd
-	return m.addMemberAndStart(client, myIPs, aliveNumExceptMe, etcdBin)
+	return m.addMemberAndStart(client, myIPs, votingNumExceptMe, etcdBin)
 }
 
 // getDeadNames converts dead names map to slice for logging
@@ -238,8 +244,9 @@ func getDeadNames(deadnames map[string]struct{}) []string {
 	return names
 }
 
-// addMemberAndStart adds member to cluster and starts etcd
-func (m *Manager) addMemberAndStart(client etcdcli.Cluster, myIPs []string, alive int, etcdBin string) (*exec.Cmd, error) {
+// addMemberAndStart adds member to cluster and starts etcd.
+// votingNum is the count of existing voting (non-learner) members excluding self.
+func (m *Manager) addMemberAndStart(client etcdcli.Cluster, myIPs []string, votingNum int, etcdBin string) (*exec.Cmd, error) {
 	// Build peer URLs
 	mypeers := make([]string, 0, len(myIPs))
 	for _, ip := range myIPs {
@@ -259,25 +266,25 @@ func (m *Manager) addMemberAndStart(client etcdcli.Cluster, myIPs []string, aliv
 	// 2. If multiple non-learner members but only 1 would remain: reject (quorum protection)
 	// 3. Otherwise: add as regular member
 	switch {
-	case alive == 1:
+	case votingNum == 1:
 		klog.Infof("adding %s as learner then will promote", m.cfg.PodName)
 		addResp, err = client.MemberAddAsLearner(ctx, mypeers)
 		shouldPromote = true
-	case alive > 1:
+	case votingNum > 1:
 		// Check if adding would leave only 1 non-learner (shouldn't happen in normal flow)
 		klog.Infof("adding %s to cluster then start etcd", m.cfg.PodName)
 		addResp, err = client.MemberAdd(ctx, mypeers)
 	default:
 		// nonLearn == 0, this shouldn't happen in a healthy cluster
-		klog.Warning("Cluster has no non-learner members, this is an unhealthy state")
-		return nil, fmt.Errorf("cluster has no non-learner members, cannot add new member safely")
+		klog.Warning("Cluster has no voting members, this is an unhealthy state")
+		return nil, fmt.Errorf("cluster has no voting members, cannot add new member safely")
 	}
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to add member: %w", err)
 	}
-	klog.Infof("Add to cluster successfully: ID=%016x, Name=%s, IsLearner=%v",
-		addResp.Member.ID, m.cfg.PodName, addResp.Member.IsLearner)
+	klog.Infof("Add to cluster successfully: ClusterID=%016x, MemID=%016x, Name=%s, IsLearner=%v",
+		addResp.Header.ClusterId, addResp.Member.ID, m.cfg.PodName, addResp.Member.IsLearner)
 
 	// Build cluster configuration
 	cluster := m.buildClusterConfig(addResp.Members)
@@ -313,10 +320,11 @@ func (m *Manager) buildClusterConfig(members []*pb.Member) []string {
 	var cluster []string
 	for _, member := range members {
 		for _, url := range member.PeerURLs {
-			if member.Name == "" {
-				member.Name = m.cfg.PodName
+			name := member.Name
+			if name == "" {
+				name = m.cfg.PodName
 			}
-			cluster = append(cluster, fmt.Sprintf("%s=%s", member.Name, url))
+			cluster = append(cluster, fmt.Sprintf("%s=%s", name, url))
 		}
 	}
 	return cluster
@@ -369,9 +377,8 @@ type BrainSplitCheckConfig struct {
 	CertFile    string
 	KeyFile     string
 	MyPodName   string
-	MyIPs       []string // My own IPs to exclude from checking
-	CheckPeriod time.Duration
-	MaxChecks   int // Maximum number of successful checks before stopping (0 = unlimited)
+	MyIPs       []string      // My own IPs to exclude from checking
+	CheckPeriod time.Duration // Check interval (default: 5s)
 }
 
 // BrainSplitCheckResult represents the result of brain split detection
@@ -381,20 +388,18 @@ type BrainSplitCheckResult struct {
 }
 
 // StartBrainSplitChecker starts a goroutine to periodically check for brain split.
-// For etcd-0, after initializing a new cluster, we need to verify that other nodes
-// joining the cluster include etcd-0 in their member list.
-// Returns a channel that will receive the result when brain split is detected or check completes.
+// It continuously compares cluster ID and member ID with other nodes.
+// Only exits when: (1) brain split detected, (2) cluster ID + member ID verified, or (3) stop signal.
+// No maximum check count — loops until consistent.
 func (m *Manager) StartBrainSplitChecker(cfg *BrainSplitCheckConfig, stopCh <-chan struct{}) <-chan BrainSplitCheckResult {
 	resultCh := make(chan BrainSplitCheckResult, 1)
 
 	go func() {
 		defer close(resultCh)
 
-		if cfg.CheckPeriod <= 0 {
-			cfg.CheckPeriod = 5 * time.Second
-		}
-		if cfg.MaxChecks <= 0 {
-			cfg.MaxChecks = 60 // Default: check for up to 5 minutes (60 * 5s)
+		period := cfg.CheckPeriod
+		if period <= 0 {
+			period = 5 * time.Second // default 5s
 		}
 
 		tlscfg, err := loadTLSConfig(cfg.CertFile, cfg.KeyFile)
@@ -403,11 +408,10 @@ func (m *Manager) StartBrainSplitChecker(cfg *BrainSplitCheckConfig, stopCh <-ch
 			return
 		}
 
-		ticker := time.NewTicker(cfg.CheckPeriod)
+		ticker := time.NewTicker(period)
 		defer ticker.Stop()
 
-		successCount := 0
-		klog.Infof("Brain split checker started for %s, checking every %v", cfg.MyPodName, cfg.CheckPeriod)
+		klog.Infof("Brain split checker started for %s, checking every %v (no max checks limit)", cfg.MyPodName, period)
 
 		for {
 			select {
@@ -422,19 +426,18 @@ func (m *Manager) StartBrainSplitChecker(cfg *BrainSplitCheckConfig, stopCh <-ch
 					return
 				}
 
-				// If we found other nodes and they all include us, increment success count
 				if result.Reason == "verified" {
-					successCount++
-					klog.Infof("Brain split check passed (%d/%d)", successCount, cfg.MaxChecks)
-					if successCount >= cfg.MaxChecks {
-						klog.Info("Brain split checker: all checks passed, stopping checker")
-						resultCh <- BrainSplitCheckResult{
-							BrainSplitDetected: false,
-							Reason:             "all checks passed",
-						}
-						return
+					// cluster ID and member ID both consistent — safe to exit
+					klog.Infof("Brain split check passed: cluster ID and member ID verified")
+					resultCh <- BrainSplitCheckResult{
+						BrainSplitDetected: false,
+						Reason:             "all checks passed",
 					}
+					return
 				}
+
+				// "local not ready" / "no other nodes" / "no healthy nodes to compare" / "read error" — continue looping
+				klog.Infof("Brain split check inconclusive: %s, will retry after %v", result.Reason, period)
 			}
 		}
 	}()
@@ -442,7 +445,11 @@ func (m *Manager) StartBrainSplitChecker(cfg *BrainSplitCheckConfig, stopCh <-ch
 	return resultCh
 }
 
-// checkBrainSplit performs a single brain split check
+// checkBrainSplit performs a single brain split check.
+// It compares cluster ID and member ID with reachable nodes.
+// It MUST successfully compare with at least one other node before returning "verified".
+// If local cluster info is not available yet, or no other node passes verification, it returns
+// inconclusive so the caller retries.
 func (m *Manager) checkBrainSplit(cfg *BrainSplitCheckConfig, tlscfg *tls.Config) BrainSplitCheckResult {
 	// Build a set of my own IPs for quick lookup
 	myIPSet := make(map[string]struct{})
@@ -450,15 +457,40 @@ func (m *Manager) checkBrainSplit(cfg *BrainSplitCheckConfig, tlscfg *tls.Config
 		myIPSet[ip] = struct{}{}
 	}
 
-	// Read all IP files from nodeIPDir
+	// Get local cluster info — must succeed to perform meaningful comparison
+	myClusterID, myMemberID := m.getLocalClusterInfo(tlscfg)
+	if myClusterID == 0 || myMemberID == 0 {
+		klog.V(2).Info("Brain split check: local cluster info not available yet, retrying")
+		return BrainSplitCheckResult{BrainSplitDetected: false, Reason: "local not ready"}
+	}
+
+	// Read all IP files from nodeIPDir and find healthy other endpoints
+	otherEndpoints, result := collectOtherEndpoints(cfg, tlscfg, myIPSet)
+	if result != nil {
+		return *result
+	}
+
+	// Compare cluster ID and member ID with each healthy node.
+	// Must successfully verify with at least one node.
+	return verifyWithOtherNodes(otherEndpoints, tlscfg, myClusterID, myMemberID)
+}
+
+// collectOtherEndpoints reads nodeIPDir, finds healthy endpoints from other nodes (excluding myIPSet).
+// Returns a pre-built BrainSplitCheckResult if verification cannot proceed (nil endpoints).
+func collectOtherEndpoints(
+	cfg *BrainSplitCheckConfig,
+	tlscfg *tls.Config,
+	myIPSet map[string]struct{},
+) ([]string, *BrainSplitCheckResult) {
 	entries, err := os.ReadDir(cfg.NodeIPDir)
 	if err != nil {
 		klog.V(2).Infof("Brain split check: failed to read nodeIPDir: %v", err)
-		return BrainSplitCheckResult{BrainSplitDetected: false, Reason: "read error"}
+		return nil, &BrainSplitCheckResult{BrainSplitDetected: false, Reason: "read error"}
 	}
 
-	// Find other healthy nodes (excluding ourselves)
 	var otherEndpoints []string
+	var totalOtherNodes int
+
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -473,6 +505,7 @@ func (m *Manager) checkBrainSplit(cfg *BrainSplitCheckConfig, tlscfg *tls.Config
 		if _, isMyIP := myIPSet[masterIP]; isMyIP {
 			continue
 		}
+		totalOtherNodes++
 
 		// Read IP list from file
 		ips, err := readIPFile(cfg.NodeIPDir, masterIP)
@@ -486,33 +519,45 @@ func (m *Manager) checkBrainSplit(cfg *BrainSplitCheckConfig, tlscfg *tls.Config
 				continue
 			}
 			endpoint := net.JoinHostPort(ip, cfg.ClientPort)
-			if checkSingleEndpoint(context.Background(), endpoint, tlscfg) {
+			health := checkSingleEndpoint(context.Background(), endpoint, tlscfg)
+			if health == HealthHealthy {
 				otherEndpoints = append(otherEndpoints, endpoint)
+				break
 			}
 		}
 	}
 
 	if len(otherEndpoints) == 0 {
-		// No other healthy nodes found yet, continue checking
-		klog.V(2).Info("Brain split check: no other healthy nodes found yet")
-		return BrainSplitCheckResult{BrainSplitDetected: false, Reason: "no other nodes"}
+		reason := "no other nodes"
+		if totalOtherNodes > 0 {
+			reason = "no healthy nodes to compare"
+			klog.V(2).Info("Brain split check: no healthy nodes to compare, will retry")
+		}
+		return nil, &BrainSplitCheckResult{BrainSplitDetected: false, Reason: reason}
 	}
 
-	// Connect to other nodes and check if they include us in their member list
-	for _, endpoint := range otherEndpoints {
-		cliconfig := etcdcli.Config{
-			Endpoints:   []string{endpoint},
-			DialTimeout: 3 * time.Second,
-			TLS:         tlscfg,
-		}
+	return otherEndpoints, nil
+}
 
-		client, err := etcdcli.New(cliconfig)
+// verifyWithOtherNodes compares cluster ID and member ID against each healthy endpoint.
+func verifyWithOtherNodes(
+	endpoints []string,
+	tlscfg *tls.Config,
+	myClusterID, myMemberID uint64,
+) BrainSplitCheckResult {
+	verifiedCount := 0
+	for _, endpoint := range endpoints {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		client, err := etcdcli.New(etcdcli.Config{
+			Endpoints: []string{endpoint},
+			TLS:       tlscfg,
+		})
 		if err != nil {
+			cancel()
 			klog.V(2).Infof("Brain split check: failed to connect to %s: %v", endpoint, err)
 			continue
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		resp, err := client.MemberList(ctx)
 		cancel()
 		client.Close()
@@ -522,25 +567,76 @@ func (m *Manager) checkBrainSplit(cfg *BrainSplitCheckConfig, tlscfg *tls.Config
 			continue
 		}
 
-		// Check if we are in the member list
-		foundSelf := false
-		for _, member := range resp.Members {
-			if member.Name == cfg.MyPodName {
-				foundSelf = true
-				break
-			}
-		}
-
-		if !foundSelf {
-			// Brain split detected: another cluster exists without us
+		// Check 1: cluster ID must match
+		if resp.Header.ClusterId != 0 && myClusterID != resp.Header.ClusterId {
 			return BrainSplitCheckResult{
 				BrainSplitDetected: true,
-				Reason:             fmt.Sprintf("endpoint %s has a cluster without %s", endpoint, cfg.MyPodName),
+				Reason: fmt.Sprintf("cluster ID mismatch: ours=%016x, theirs=%016x from %s",
+					myClusterID, resp.Header.ClusterId, endpoint),
 			}
 		}
 
-		klog.V(2).Infof("Brain split check: endpoint %s includes %s in member list", endpoint, cfg.MyPodName)
+		// Check 2: our member ID must be in the member list
+		if !memberIDFound(resp.Members, myMemberID) {
+			return BrainSplitCheckResult{
+				BrainSplitDetected: true,
+				Reason:             fmt.Sprintf("endpoint %s does not contain our member ID %016x", endpoint, myMemberID),
+			}
+		}
+
+		verifiedCount++
+		klog.Infof("Brain split check: endpoint %s verified (cluster ID=%016x, member ID=%016x match)",
+			endpoint, myClusterID, myMemberID)
+	}
+
+	if verifiedCount == 0 {
+		klog.V(2).Info("Brain split check: no other node passed full verification, will retry")
+		return BrainSplitCheckResult{BrainSplitDetected: false, Reason: "no healthy nodes to compare"}
 	}
 
 	return BrainSplitCheckResult{BrainSplitDetected: false, Reason: "verified"}
+}
+
+// memberIDFound checks if the member ID exists in the member list.
+func memberIDFound(members []*pb.Member, memberID uint64) bool {
+	for _, member := range members {
+		if member.ID == memberID {
+			return true
+		}
+	}
+	return false
+}
+
+// getLocalClusterInfo retrieves the local etcd cluster ID and member ID
+func (m *Manager) getLocalClusterInfo(tlscfg *tls.Config) (clusterID uint64, memberID uint64) {
+	// Connect to local etcd using the first client IP
+	client, err := etcdcli.New(etcdcli.Config{
+		Endpoints:   []string{net.JoinHostPort("127.0.0.1", m.cfg.ClientPort)},
+		DialTimeout: 2 * time.Second,
+		TLS:         tlscfg,
+	})
+	if err != nil {
+		klog.V(2).Infof("Brain split check: failed to connect to local etcd: %v", err)
+		return 0, 0
+	}
+	defer client.Close()
+
+	// Get member list from local etcd to find our member ID
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	resp, err := client.MemberList(ctx)
+	if err != nil {
+		klog.V(2).Infof("Brain split check: failed to list members from local etcd: %v", err)
+		return 0, 0
+	}
+
+	clusterID = resp.Header.ClusterId
+	for _, member := range resp.Members {
+		if member.Name == m.cfg.PodName {
+			memberID = member.ID
+			break
+		}
+	}
+	return clusterID, memberID
 }

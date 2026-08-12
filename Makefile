@@ -18,10 +18,10 @@ BUILD_PLATFORMS ?= linux/amd64
 IMAGE_PLATFORMS ?= $(call join-with-comma,$(BUILD_PLATFORMS))
 
 # Docker configuration
-DOCKER_REGISTRY ?= 
+DOCKER_REGISTRY ?=
 DOCKER_IMAGE ?= multiarch/etcdcluster
-DOCKER_TAG ?= latest
-DOCKER_PUSH ?= 0
+DOCKER_TAG ?= dev
+DOCKER_PUSH ?= 1
 
 ifeq ($(DOCKER_PUSH),1)
 DOCKER_BUILD_FLAGS = --push
@@ -60,7 +60,7 @@ fmt: ## Formats all code with go fmt
 test-build: ## Tests whether the code compiles
 	@go build -o /dev/null ./...
 
-build: 
+build:
 	@for DIR in $(BIN_SUBDIRS); do \
 		for PLATFORM in $(BUILD_PLATFORMS); do \
 			mkdir -p $(ROOT_DIR)/bin/$${PLATFORM}; \
@@ -101,13 +101,13 @@ out/report.json: out
 clean: ## Cleans up everything
 	@rm -rf bin out
 
-docker: ## Builds docker image
+docker-buildx: ## Builds docker image
 	@echo "Building Docker image: $(DOCKER_FULL_IMAGE)"
-	docker buildx build --platform $(IMAGE_PLATFORMS) $(DOCKER_BUILD_FLAGS) --cache-to type=inline  -t $(DOCKER_FULL_IMAGE) .
+	docker buildx build --platform $(IMAGE_PLATFORMS) $(DOCKER_BUILD_FLAGS) -t $(DOCKER_FULL_IMAGE) .
 
-docker-push: docker ## Builds and pushes docker image
-	@echo "Pushing Docker image: $(DOCKER_FULL_IMAGE)"
-	docker push $(DOCKER_FULL_IMAGE)
+docker-build: ## Builds docker image
+	@echo "Building Docker image: $(DOCKER_FULL_IMAGE)"
+	docker build --platform $(IMAGE_PLATFORMS) $(DOCKER_BUILD_FLAGS) -t $(DOCKER_FULL_IMAGE) .
 
 generate: ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	@go run sigs.k8s.io/controller-tools/cmd/controller-gen object:headerFile="hack/boilerplate.go.txt" paths="./..."

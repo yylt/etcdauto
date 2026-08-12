@@ -34,10 +34,23 @@ type DiscoveryConfig struct {
 	KeyFile     string
 }
 
+// EndpointHealth represents the health status of an endpoint
+type EndpointHealth int
+
+const (
+	// HealthUnreachable: cannot connect — network issues only (TLS handshake failure, connection refused, timeout)
+	HealthUnreachable EndpointHealth = iota
+	// HealthHealthy: fully healthy — Get succeeded and no alarms
+	HealthHealthy
+	// HealthNotReady: connected but etcd not ready (NoLeader, starting, NOSPACE, other alarms)
+	HealthNotReady
+)
+
 // EndpointInfo holds information about discovered endpoints
 type EndpointInfo struct {
-	AliveEndpoints map[string][]string // masterIP -> []IP
-	DeadNames      map[string]struct{} // masterIP -> struct
+	ReadyNodes    map[string][]string // masterIP -> []IP (HealthHealthy)
+	NotReadyNodes map[string]struct{} // masterIP -> struct{} (HealthNotReady)
+	DeadNames     map[string]struct{} // masterIP -> struct{} (file read errors etc.)
 }
 
 // DiscoverEndpoints discovers alive and dead etcd endpoints from nodeIPDir
@@ -45,8 +58,9 @@ func DiscoverEndpoints(cfg *DiscoveryConfig) (*EndpointInfo, error) {
 	klog.Infof("Starting endpoint discovery from nodeIPDir: %s", cfg.NodeIPDir)
 
 	info := &EndpointInfo{
-		AliveEndpoints: make(map[string][]string),
-		DeadNames:      make(map[string]struct{}),
+		ReadyNodes:    make(map[string][]string),
+		NotReadyNodes: make(map[string]struct{}),
+		DeadNames:     make(map[string]struct{}),
 	}
 	// Load client cert
 	tlscfg, err := loadTLSConfig(cfg.CertFile, cfg.KeyFile)
@@ -93,15 +107,18 @@ func DiscoverEndpoints(cfg *DiscoveryConfig) (*EndpointInfo, error) {
 			}
 
 			// Check health of this master IP's endpoints
-			healthy := checkEndpointHealth(ips, cfg.ClientPort, tlscfg)
+			health := checkEndpointHealth(ips, cfg.ClientPort, tlscfg)
 
 			mu.Lock()
-			if healthy {
-				info.AliveEndpoints[masterIP] = ips
-				klog.Infof("Master IP %s marked as alive with IPs: %v", masterIP, ips)
-			} else {
-				info.DeadNames[masterIP] = struct{}{}
-				klog.Infof("Master IP %s marked as dead", masterIP)
+			switch health {
+			case HealthHealthy:
+				info.ReadyNodes[masterIP] = ips
+				klog.Infof("Master IP %s marked as ready with IPs: %v", masterIP, ips)
+			case HealthNotReady:
+				info.NotReadyNodes[masterIP] = struct{}{}
+				klog.Infof("Master IP %s marked as not-ready", masterIP)
+			case HealthUnreachable:
+				klog.Infof("Master IP %s is unreachable", masterIP)
 			}
 			mu.Unlock()
 		}(masterIP)
@@ -109,9 +126,9 @@ func DiscoverEndpoints(cfg *DiscoveryConfig) (*EndpointInfo, error) {
 
 	wg.Wait()
 
-	klog.Infof("Endpoint discovery complete: %d alive",
-		len(info.AliveEndpoints))
-	klog.V(2).Infof("Alive endpoints: %v", info.AliveEndpoints)
+	klog.Infof("Endpoint discovery complete: %d ready, %d not-ready",
+		len(info.ReadyNodes), len(info.NotReadyNodes))
+	klog.V(2).Infof("Ready nodes: %v, Not-ready nodes: %v", info.ReadyNodes, info.NotReadyNodes)
 	return info, nil
 }
 
@@ -129,17 +146,18 @@ func loadTLSConfig(certFile, keyFile string) (*tls.Config, error) {
 }
 
 // checkEndpointHealth checks if any endpoint in the IP list is healthy
-func checkEndpointHealth(iplist []string, clientPort string, tlscfg *tls.Config) bool {
+// Returns EndpointHealth — the best status among all IPs (Healthy > NotReady > Unreachable)
+func checkEndpointHealth(iplist []string, clientPort string, tlscfg *tls.Config) EndpointHealth {
 	if len(iplist) == 0 {
 		klog.Warning("Empty IP list provided for health check")
-		return false
+		return HealthUnreachable
 	}
 
 	var (
 		ctx = context.Background()
 
 		wg     sync.WaitGroup
-		health = make(chan bool, len(iplist))
+		health = make(chan EndpointHealth, len(iplist))
 	)
 	for _, ip := range iplist {
 		wg.Add(1)
@@ -153,29 +171,49 @@ func checkEndpointHealth(iplist []string, clientPort string, tlscfg *tls.Config)
 		close(health)
 	}()
 
+	bestStatus := HealthUnreachable
 	for h := range health {
-		if h {
-			return true
+		if h == HealthHealthy {
+			return HealthHealthy
+		}
+		if h == HealthNotReady {
+			bestStatus = HealthNotReady
 		}
 	}
 
-	return false
+	return bestStatus
 }
 
-func checkSingleEndpoint(ctx context.Context, endpoint string, tlscfg *tls.Config) bool {
+// checkSingleEndpoint probes a single etcd endpoint and returns its health state.
+//
+// Classification logic:
+//   - TCP port unreachable (2s dial timeout)           → HealthUnreachable
+//   - TCP reachable, Get+AlarmList OK (3s context)     → HealthHealthy
+//   - TCP reachable, but Get failed / alarms present   → HealthNotReady
+//
+// Timeout rationale (all intra-node / same LAN, worst case ~1ms RTT):
+//   - 2s TCP dial: generous enough for overloaded host, tight enough to not stall discovery
+//   - 3s API context: covers Get → 2 RTT + AlarmList → 2 RTT = 4 RTT, ample overhead
+func checkSingleEndpoint(ctx context.Context, endpoint string, tlscfg *tls.Config) EndpointHealth {
+	// Phase 1: TCP dial — cheap, separates "network down" from "etcd not ready"
+	conn, err := net.DialTimeout("tcp", endpoint, 2*time.Second)
+	if err != nil {
+		return HealthUnreachable
+	}
+	conn.Close()
+
+	// Phase 2: TCP is reachable — probe etcd API
+	// DialTimeout is omitted from client config: TCP connectivity already verified.
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 
-	cliconfig := etcdcli.Config{
-		Endpoints:   []string{endpoint},
-		DialTimeout: 2 * time.Second,
-		TLS:         tlscfg,
-		Logger:      zap.NewNop(),
-	}
-
-	client, err := etcdcli.New(cliconfig)
+	client, err := etcdcli.New(etcdcli.Config{
+		Endpoints: []string{endpoint},
+		TLS:       tlscfg,
+		Logger:    zap.NewNop(),
+	})
 	if err != nil {
-		return false
+		return HealthNotReady
 	}
 	defer client.Close()
 
@@ -183,10 +221,11 @@ func checkSingleEndpoint(ctx context.Context, endpoint string, tlscfg *tls.Confi
 	if err == nil || errors.Is(err, rpctypes.ErrPermissionDenied) {
 		resp, err := client.AlarmList(ctx)
 		if err == nil && len(resp.Alarms) == 0 {
-			return true
+			return HealthHealthy
 		}
+		return HealthNotReady
 	}
-	return false
+	return HealthNotReady
 }
 
 // readIPFile reads IP addresses from a file in nodeIPDir
@@ -262,10 +301,10 @@ func BuildPeerEndpoints(endpoints map[string][]string, port string, withName, wi
 	return addresses
 }
 
-// GetAllDiscoveredIPs returns all discovered IPs from endpoint info
+// GetAllDiscoveredIPs returns all discovered ready IPs from endpoint info
 func GetAllDiscoveredIPs(info *EndpointInfo) []string {
 	ipSet := make(map[string]bool)
-	for _, iplist := range info.AliveEndpoints {
+	for _, iplist := range info.ReadyNodes {
 		for _, ip := range iplist {
 			ipSet[ip] = true
 		}
