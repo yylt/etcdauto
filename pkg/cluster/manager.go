@@ -123,7 +123,12 @@ func (m *Manager) JoinExistingCluster(client etcdcli.Cluster, myIPs []string, de
 		return nil, fmt.Errorf("failed to list members: %w", err)
 	}
 
-	myMemberID, myIsLearner, votingNumExceptMe := m.processMembers(ctx, client, resp.Members, deadnames)
+	// Build the set of peer URLs that belong to this pod. It is used to
+	// recognize ourselves in the member list even when our member Name is still
+	// empty (e.g. we were previously added as an unstarted learner).
+	myPeerURLs := buildPeerURLSet(myIPs, m.cfg.PeerPort)
+
+	myMemberID, myIsLearner, votingNumExceptMe := m.processMembers(ctx, client, resp.Members, deadnames, myPeerURLs)
 
 	// Handle existing member or add new member
 	return m.handleMemberJoin(ctx, client, myMemberID, myIsLearner, myIPs, votingNumExceptMe, etcdBin)
@@ -131,7 +136,13 @@ func (m *Manager) JoinExistingCluster(client etcdcli.Cluster, myIPs []string, de
 
 // processMembers processes the member list, removes dead members, and finds current pod.
 // Returns: myMemberID, myIsLearner, votingNumExceptMe (count of non-learner, non-self members).
-func (m *Manager) processMembers(ctx context.Context, client etcdcli.Cluster, members []*pb.Member, deadnames map[string]struct{}) (uint64, bool, int) {
+//
+// myPeerURLs is the set of peer URLs that belong to this pod. A member is recognized
+// as "self" when either its Name matches this pod, or its peer URLs match myPeerURLs.
+// The latter handles the case where we were previously added as a learner whose etcd
+// process never started (member Name is empty/unknown), so matching by Name alone fails
+// and would otherwise cause a duplicate "Peer URLs already exists" MemberAdd.
+func (m *Manager) processMembers(ctx context.Context, client etcdcli.Cluster, members []*pb.Member, deadnames map[string]struct{}, myPeerURLs map[string]struct{}) (uint64, bool, int) {
 	var (
 		myMemberID        uint64
 		myIsLearner       bool
@@ -139,10 +150,15 @@ func (m *Manager) processMembers(ctx context.Context, client etcdcli.Cluster, me
 	)
 
 	for _, member := range members {
-		if member.Name == m.cfg.PodName {
-			myMemberID = member.ID
+		// Recognize ourselves by Name OR by peer URLs (see comment above).
+		if member.Name == m.cfg.PodName || peerURLsMatch(member.PeerURLs, myPeerURLs) {
+			// Prefer a non-zero ID from the peer-URL match to cover the empty-Name case.
+			if member.ID != 0 {
+				myMemberID = member.ID
+			}
 			myIsLearner = member.GetIsLearner()
-			klog.Infof("Found myself in cluster: ID=%016x, IsLearner=%v", member.ID, member.IsLearner)
+			klog.Infof("Found myself in cluster: ID=%016x, IsLearner=%v (by %s)",
+				member.ID, member.IsLearner, matchReason(member, m.cfg.PodName, myPeerURLs))
 			continue
 		}
 
@@ -242,6 +258,44 @@ func getDeadNames(deadnames map[string]struct{}) []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+// buildPeerURLSet builds the set of peer URLs that belong to this pod from its IPs.
+func buildPeerURLSet(myIPs []string, peerPort string) map[string]struct{} {
+	set := make(map[string]struct{}, len(myIPs))
+	for _, ip := range myIPs {
+		set[fmt.Sprintf("https://%s:%s", ip, peerPort)] = struct{}{}
+	}
+	return set
+}
+
+// peerURLsMatch reports whether member's peer URLs fully match the given set.
+// An exact, non-empty match means the member is registered with exactly our peer
+// URLs (i.e. it is us), regardless of its Name.
+func peerURLsMatch(peerURLs []string, myPeerURLs map[string]struct{}) bool {
+	if len(peerURLs) == 0 || len(myPeerURLs) == 0 {
+		return false
+	}
+	if len(peerURLs) != len(myPeerURLs) {
+		return false
+	}
+	for _, u := range peerURLs {
+		if _, ok := myPeerURLs[u]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// matchReason returns a short label describing why a member was recognized as self.
+func matchReason(member *pb.Member, podName string, myPeerURLs map[string]struct{}) string {
+	if member.Name == podName {
+		return "name"
+	}
+	if peerURLsMatch(member.PeerURLs, myPeerURLs) {
+		return "peer URLs"
+	}
+	return "unknown"
 }
 
 // addMemberAndStart adds member to cluster and starts etcd.
